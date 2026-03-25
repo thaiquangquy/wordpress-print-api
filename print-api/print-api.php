@@ -30,7 +30,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 define( 'PRINT_API_VERSION',       '1.0.0' );
 define( 'PRINT_API_DIR',           plugin_dir_path( __FILE__ ) );
 define( 'PRINT_API_URL',           plugin_dir_url( __FILE__ ) );
-define( 'PRINT_API_REQUIRE_LOGIN', false );   // ← change to true for auth-gated downloads
+define( 'PRINT_API_REQUIRE_LOGIN', true );    // ← only logged-in users can request a token
 
 // ─── Load class files ────────────────────────────────────────────────────────
 // require_once makes sure each file is included exactly once even if something
