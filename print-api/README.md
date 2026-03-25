@@ -195,141 +195,170 @@ const { parts } = await pdfRes.json();
 
 ---
 
-## Local Testing (LocalWP)
+## Local Testing (LocalWP on Windows + WSL2)
 
-### 1. Install LocalWP
+This guide assumes LocalWP runs on **Windows** and you run `curl` commands from **WSL2**.
+`mysite.local` is registered in the Windows hosts file but not in WSL2, so you need
+to route requests through the Windows host IP.
 
-Download from https://localwp.com/ and create a new site (e.g., `mysite.local`).
+### 1. Install LocalWP and create a site
 
-### 2. Copy the plugin
+Download from https://localwp.com/, create a new site named `mysite` so the URL is `mysite.local`.
+
+### 2. Copy the plugin from WSL2 to LocalWP
+
+LocalWP stores its files under `C:\Users\<you>\Local Sites\`. From WSL2 that path is
+`/mnt/c/Users/<you>/Local Sites/`. Adjust the username in the path:
 
 ```bash
-cp -r print-api/ ~/Local\ Sites/mysite/app/public/wp-content/plugins/
+cp -r /path/to/print-api "/mnt/c/Users/<you>/Local Sites/mysite/app/public/wp-content/plugins/"
 ```
 
-### 3. Activate
+### 3. Activate in WP Admin
 
 Go to **WP Admin → Plugins** and click **Activate** next to "Print API".
 
-### 4. Create dummy PDF files
+Also confirm pretty permalinks are enabled — without them the REST API returns 404:
+**WP Admin → Settings → Permalinks → select "Post name" → Save Changes**
+
+### 4. Upload PDF files
+
+The plugin expects files named exactly `part1.pdf`, `part2.pdf`, `part3.pdf` inside
+a folder named `book_{id}`. Create the folder and drop in the files from Windows Explorer:
+
+```
+C:\Users\<you>\Local Sites\mysite\app\public\wp-content\uploads\print-api\book_123\part1.pdf
+C:\Users\<you>\Local Sites\mysite\app\public\wp-content\uploads\print-api\book_123\part2.pdf
+C:\Users\<you>\Local Sites\mysite\app\public\wp-content\uploads\print-api\book_123\part3.pdf
+```
+
+Or create placeholder files from WSL2 for a quick test:
 
 ```bash
-UPLOADS=~/Local\ Sites/mysite/app/public/wp-content/uploads
-
-mkdir -p "$UPLOADS/print-api/book_123"
-
+DIR="/mnt/c/Users/<you>/Local Sites/mysite/app/public/wp-content/uploads/print-api/book_123"
+mkdir -p "$DIR"
 for i in 1 2 3; do
-  echo "%PDF-1.4 placeholder part $i" > "$UPLOADS/print-api/book_123/part$i.pdf"
+  echo "%PDF-1.4 placeholder" > "$DIR/part${i}.pdf"
 done
 ```
 
-### 5. Check the REST API is reachable
+### 5. Find the Windows host IP from WSL2
 
-Before fetching a nonce, confirm that WordPress pretty permalinks are enabled
-and the REST API responds. This is the most common reason nonces come back empty.
+WSL2 cannot resolve `mysite.local` directly. Use curl's `--resolve` flag to point
+the hostname at the Windows gateway IP so requests reach LocalWP:
 
 ```bash
-curl -s 'http://mysite.local/wp-json/' | python3 -c "import sys,json; d=json.load(sys.stdin); print('REST OK — site:', d['name'])"
+# Get the Windows host IP (this is the gateway WSL2 uses to reach Windows)
+WINDOWS_IP=$(ip route show | grep default | awk '{print $3}')
+echo "Windows IP: $WINDOWS_IP"
+# Typically something like 172.18.80.1
+
+# Verify the site is reachable
+curl -s --resolve "mysite.local:80:$WINDOWS_IP" 'http://mysite.local/wp-json/' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('REST OK:', d['name'])"
+# Expected: REST OK: mysite
 ```
 
-If you see `REST OK — site: My Site` you are good. If you get a 404 HTML page:
-- Go to **WP Admin → Settings → Permalinks**
-- Select any option other than "Plain" (e.g. "Post name")
-- Click **Save Changes** — this regenerates the `.htaccess` rewrite rules
+If you get a JSON parse error instead of "REST OK", pretty permalinks are not enabled
+(see step 3).
 
-### 6. Get a nonce
+### 6. Set the RESOLVE helper variable
 
-> **Why no login step?**
-> WordPress generates nonces for both logged-in and anonymous users.
-> Because `PRINT_API_REQUIRE_LOGIN` is `false` (the default), an **anonymous
-> nonce works fine**. Critically, the nonce and the token request must share
-> the same user context — both are made here without a session cookie, so
-> WordPress sees user_id=0 for both and the verification succeeds.
-> Mixing a logged-in nonce with an anonymous token request is what causes
-> an empty/invalid nonce.
+Put this at the top of your shell session so every curl command below uses it automatically:
 
 ```bash
-# Step 1: fetch the raw response first — so you can see exactly what is returned
-curl -s 'http://mysite.local/wp-json/print-api/v1/nonce'
-# Expected output: {"nonce":"a1b2c3d4e5..."}
+WINDOWS_IP=$(ip route show | grep default | awk '{print $3}')
+RESOLVE="--resolve mysite.local:80:$WINDOWS_IP"
+```
 
-# Step 2: extract the value with python3 (reliable JSON parsing, no grep/cut)
-NONCE=$(curl -s 'http://mysite.local/wp-json/print-api/v1/nonce' \
+### 7. Get a nonce
+
+No login is required because `PRINT_API_REQUIRE_LOGIN` is `false` by default.
+WordPress generates a valid nonce for anonymous users. The only rule is that the nonce
+request and the token request must happen in the **same user context** — here both are
+anonymous (no session cookie), so WordPress sees `user_id=0` for both and verification passes.
+
+```bash
+NONCE=$(curl -s $RESOLVE 'http://mysite.local/wp-json/print-api/v1/nonce' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['nonce'])")
-
 echo "Nonce: [$NONCE]"
-# If brackets show an empty value, run Step 1 above to see the raw error
+# Expected: Nonce: [a1b2c3d4e5]
 ```
 
-### 7. Request a token
+### 8. Get a token
 
 ```bash
-# Step 1: see the raw response first
-curl -s \
-  -X POST 'http://mysite.local/wp-json/print-api/v1/token' \
-  -H "Content-Type: application/json" \
-  -H "X-WP-Nonce: $NONCE" \
-  -d '{"book_id": 123}'
-# Expected: {"token":"a3f9c2d1..."}
-
-# Step 2: extract the token
-TOKEN=$(curl -s \
+TOKEN=$(curl -s $RESOLVE \
   -X POST 'http://mysite.local/wp-json/print-api/v1/token' \
   -H "Content-Type: application/json" \
   -H "X-WP-Nonce: $NONCE" \
   -d '{"book_id": 123}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-
 echo "Token: [$TOKEN]"
+# Expected: Token: [64-char hex string]
 ```
 
-Expected response:
-```json
-{ "token": "a3f9c2d1…" }
-```
-
-### 7. Exchange token for PDF URLs
+### 9. Exchange token for PDF URLs
 
 ```bash
-# First call — succeeds
-curl "http://mysite.local/wp-json/print-api/v1/pdf?token=$TOKEN"
+# First call — succeeds and returns 3 URLs
+curl -s $RESOLVE "http://mysite.local/wp-json/print-api/v1/pdf?token=$TOKEN" \
+  | python3 -m json.tool
 ```
 
 Expected:
 ```json
 {
-  "parts": [
-    "http://mysite.local/wp-content/uploads/print-api/book_123/part1.pdf",
-    "http://mysite.local/wp-content/uploads/print-api/book_123/part2.pdf",
-    "http://mysite.local/wp-content/uploads/print-api/book_123/part3.pdf"
-  ],
-  "book_id": 123
+    "parts": [
+        "http://mysite.local/wp-content/uploads/print-api/book_123/part1.pdf",
+        "http://mysite.local/wp-content/uploads/print-api/book_123/part2.pdf",
+        "http://mysite.local/wp-content/uploads/print-api/book_123/part3.pdf"
+    ],
+    "book_id": 123
 }
 ```
 
 ```bash
-# Second call with same token — must fail
-curl "http://mysite.local/wp-json/print-api/v1/pdf?token=$TOKEN"
+# Second call with the same token — must be rejected (single-use guarantee)
+curl -s $RESOLVE "http://mysite.local/wp-json/print-api/v1/pdf?token=$TOKEN" \
+  | python3 -m json.tool
 ```
 
 Expected:
 ```json
 {
-  "code": "invalid_token",
-  "message": "Token is invalid, expired, or has already been used.",
-  "data": { "status": 401 }
+    "code": "invalid_token",
+    "message": "Token is invalid, expired, or has already been used.",
+    "data": {"status": 401}
 }
 ```
 
-### 8. Test the frontend button
+### 10. Debug: find out what path the plugin expects
 
-Add this to any WordPress page/post (use the HTML block in Gutenberg):
+If you get `book_not_found`, enable WP_DEBUG in `wp-config.php` and call the debug endpoint
+to see the exact filesystem path and which files are missing:
+
+```bash
+# 1. In wp-config.php, temporarily change:  define('WP_DEBUG', false)  →  define('WP_DEBUG', true)
+
+# 2. Call the debug endpoint
+curl -s $RESOLVE "http://mysite.local/wp-json/print-api/v1/debug/book/123" \
+  | python3 -m json.tool
+# Returns: expected_dir, dir_exists, and per-file exists flags
+
+# 3. Revert WP_DEBUG back to false when done
+```
+
+### 11. Test the frontend button
+
+Add this HTML to any WordPress page (use the HTML block in Gutenberg):
 
 ```html
 <button data-print-book="123">Download Book</button>
 ```
 
-Open the page, open browser DevTools → Network tab, click the button, and watch the two requests fire in sequence.
+Open the page in the browser, open **DevTools → Network tab**, click the button, and
+watch two requests fire in sequence: `POST /token` then `GET /pdf?token=…`.
 
 ---
 
@@ -415,12 +444,14 @@ Then reload: `sudo nginx -s reload`
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `$NONCE` is empty after extraction | REST API not reachable (404) | Enable pretty permalinks: WP Admin → Settings → Permalinks → save |
-| `$NONCE` is empty after extraction | `grep/cut` pipeline silent failure | Use `python3 -c "import sys,json; print(json.load(sys.stdin)['nonce'])"` instead |
-| 403 `invalid_nonce` on `/token` | Nonce user context mismatch | Fetch nonce and call `/token` with the **same** session state — either both with cookies or both without. Do **not** mix logged-in nonce with anonymous token request |
-| 403 `invalid_nonce` on `/token` | Nonce expired (>12 hours old) | Re-fetch the nonce and retry immediately |
-| 404 on any `/wp-json/…` route | Pretty permalinks not set | WP Admin → Settings → Permalinks → save any option other than "Plain" |
-| 401 `invalid_token` on first use | Token TTL elapsed (>5 min) | Increase `TOKEN_TTL` in `class-token-manager.php` |
-| 404 `book_not_found` | PDF files missing on disk | Check path: `uploads/print-api/book_{id}/part1.pdf` exists |
-| Plugin not showing in WP Admin | Wrong directory name | Folder must be named `print-api` and contain `print-api.php` |
-| Direct PDF URL returns 403 | `.htaccess` working correctly | This is expected — use the token flow |
+| `curl: Failed to connect` from WSL2 | `mysite.local` not in WSL2 hosts | Use `--resolve mysite.local:80:$(ip route show \| grep default \| awk '{print $3}')` |
+| JSON parse error on REST check | Pretty permalinks disabled | WP Admin → Settings → Permalinks → select "Post name" → Save |
+| `$NONCE` is empty | REST API returned an error instead of JSON | Run `curl -s $RESOLVE http://mysite.local/wp-json/print-api/v1/nonce` raw to see the actual error |
+| 403 `invalid_nonce` | Nonce fetched while logged in but token called without cookies (user context mismatch) | Fetch nonce and call `/token` without any session cookie — both anonymous |
+| 403 `invalid_nonce` | Nonce older than 12 hours | Re-fetch nonce and use immediately |
+| 404 `book_not_found` | Files don't exist at the expected path | Enable `WP_DEBUG=true`, call `/debug/book/123` to see exact expected paths and which files are missing |
+| 404 `book_not_found` | Files named `part_1.pdf` instead of `part1.pdf` | Rename to `part1.pdf`, `part2.pdf`, `part3.pdf` (no underscore between "part" and the number) |
+| 404 on any `/wp-json/…` route | Pretty permalinks disabled | WP Admin → Settings → Permalinks → save any option except "Plain" |
+| 401 `invalid_token` on first use | Token TTL elapsed (>5 min between steps) | Re-run from the nonce step; or increase `TOKEN_TTL` in `class-token-manager.php` |
+| Plugin not showing in WP Admin | Wrong folder name | Folder inside `plugins/` must be named `print-api` and contain `print-api.php` |
+| Direct PDF URL returns 403 | `.htaccess` blocking direct access | This is expected — files must be accessed through the token flow, not directly |

@@ -116,6 +116,26 @@ class Print_API_Rest {
 				'args'                => array(),
 			)
 		);
+
+		// ── Route 4: Debug — show resolved PDF paths (only when WP_DEBUG=true) ─
+		// Helps diagnose book_not_found errors during development.
+		// Disable in production by setting WP_DEBUG to false in wp-config.php.
+		register_rest_route(
+			self::NAMESPACE,
+			'/debug/book/(?P<book_id>\d+)',
+			array(
+				'methods'             => WP_REST_Server::READABLE,
+				'callback'            => array( __CLASS__, 'handle_debug_request' ),
+				'permission_callback' => '__return_true',
+				'args'                => array(
+					'book_id' => array(
+						'required'          => true,
+						'type'              => 'integer',
+						'sanitize_callback' => 'absint',
+					),
+				),
+			)
+		);
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -244,6 +264,54 @@ class Print_API_Rest {
 	public static function handle_nonce_request( WP_REST_Request $request ) {
 		return new WP_REST_Response(
 			array( 'nonce' => wp_create_nonce( 'wp_rest' ) ),
+			200
+		);
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// Handler: GET /wp-json/print-api/v1/debug/book/{book_id}
+	// ════════════════════════════════════════════════════════════════════════
+
+	/**
+	 * Show the resolved filesystem paths for a book.
+	 * Only works when WP_DEBUG is true. Returns 403 in production.
+	 *
+	 * Use this when you get book_not_found to see exactly which paths
+	 * the plugin is checking, so you can place your files correctly.
+	 *
+	 * @param  WP_REST_Request $request
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public static function handle_debug_request( WP_REST_Request $request ) {
+		if ( ! defined( 'WP_DEBUG' ) || ! WP_DEBUG ) {
+			return new WP_Error(
+				'debug_disabled',
+				'Debug endpoint is only available when WP_DEBUG is true in wp-config.php.',
+				array( 'status' => 403 )
+			);
+		}
+
+		$book_id = $request->get_param( 'book_id' );
+		$upload  = wp_upload_dir();
+		$dir     = trailingslashit( $upload['basedir'] ) . 'print-api/book_' . $book_id;
+
+		$files = array();
+		for ( $i = 1; $i <= 3; $i++ ) {
+			$path          = $dir . '/part' . $i . '.pdf';
+			$files[ 'part' . $i ] = array(
+				'expected_path' => $path,
+				'exists'        => file_exists( $path ),
+			);
+		}
+
+		return new WP_REST_Response(
+			array(
+				'book_id'       => $book_id,
+				'expected_dir'  => $dir,
+				'dir_exists'    => is_dir( $dir ),
+				'files'         => $files,
+				'uploads_base'  => $upload['basedir'],
+			),
 			200
 		);
 	}
