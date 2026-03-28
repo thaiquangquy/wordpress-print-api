@@ -3,17 +3,35 @@
  * REST API — Route Registration and Request Handlers
  *
  * This class wires together the Token Manager and PDF Resolver and exposes
- * them as two WordPress REST API endpoints.
+ * them as three WordPress REST API endpoints.
  *
  * Endpoints
  * ─────────
  *   POST  /wp-json/print-api/v1/token
  *         Body (JSON): { "book_id": 123 }
  *         Headers:     X-WP-Nonce: <nonce>
- *         Response:    { "token": "<64-char-hex>" }
+ *         Response:    { "token": "<64-char-hex>" }   ← book-level token (one-time)
  *
- *   GET   /wp-json/print-api/v1/pdf?token=<64-char-hex>
- *         Response:    { "parts": ["url1", "url2", "url3"] }
+ *   GET   /wp-json/print-api/v1/pdf?token=<book-token>
+ *         Consumes the book token.
+ *         Response:    { "parts": ["<part1-token>", …, "<partN-token>"], "part_count": N }
+ *         One token per part file found on disk (any count, not fixed at 3).
+ *         Each part token is also one-time and expires in TOKEN_TTL seconds.
+ *         NOTE: returns tokens, NOT file URLs — the actual PDF paths are
+ *               never exposed to the client.
+ *
+ *   GET   /wp-json/print-api/v1/download?token=<part-token>
+ *         Consumes the part token and streams the PDF bytes directly.
+ *         The real file URL/path is kept server-side only.
+ *
+ * Security model
+ * ──────────────
+ * 1. Book token    → one-time, expires in 5 min, must be used to get part tokens.
+ * 2. Part tokens   → one-time each, expire in 5 min, must be used to download.
+ * 3. Download      → streams file bytes through WordPress; no permanent URL exists.
+ *
+ * This means a captured token or download link can only be used once and only
+ * within the TTL window.  There is no permanent URL an attacker can reuse.
  *
  * WordPress REST API primer (for first-timers)
  * ─────────────────────────────────────────────
@@ -48,13 +66,13 @@ class Print_API_Rest {
 	const NAMESPACE = 'print-api/v1';
 
 	/**
-	 * Register the two REST routes.
+	 * Register the REST routes.
 	 *
 	 * Called on the 'rest_api_init' hook (see print-api.php).
 	 */
 	public static function register_routes() {
 
-		// ── Route 1: Issue a token ────────────────────────────────────────────
+		// ── Route 1: Issue a book token ───────────────────────────────────────
 		register_rest_route(
 			self::NAMESPACE,
 			'/token',
@@ -83,7 +101,7 @@ class Print_API_Rest {
 			)
 		);
 
-		// ── Route 2: Exchange a token for PDF URLs ────────────────────────────
+		// ── Route 2: Exchange a book token for per-part tokens ────────────────
 		register_rest_route(
 			self::NAMESPACE,
 			'/pdf',
@@ -96,16 +114,32 @@ class Print_API_Rest {
 						'required'          => true,
 						'type'              => 'string',
 						'sanitize_callback' => 'sanitize_text_field',
-						'description'       => 'The one-time token issued by the /token endpoint.',
+						'description'       => 'The one-time book token issued by the /token endpoint.',
 					),
 				),
 			)
 		);
 
-		// ── Route 3: Helper — return a fresh nonce for browser clients ────────
-		// Some front-end setups need to fetch a nonce via JS before they have
-		// one. This tiny GET endpoint returns a fresh nonce without requiring a
-		// full page reload. It's optional; you can remove it if you don't need it.
+		// ── Route 3: Consume a part token and stream the PDF bytes ────────────
+		register_rest_route(
+			self::NAMESPACE,
+			'/download',
+			array(
+				'methods'             => WP_REST_Server::READABLE,   // = 'GET'
+				'callback'            => array( __CLASS__, 'handle_download_request' ),
+				'permission_callback' => '__return_true',
+				'args'                => array(
+					'token' => array(
+						'required'          => true,
+						'type'              => 'string',
+						'sanitize_callback' => 'sanitize_text_field',
+						'description'       => 'The one-time part token issued by the /pdf endpoint.',
+					),
+				),
+			)
+		);
+
+		// ── Route 4: Helper — return a fresh nonce for browser clients ────────
 		register_rest_route(
 			self::NAMESPACE,
 			'/nonce',
@@ -117,9 +151,7 @@ class Print_API_Rest {
 			)
 		);
 
-		// ── Route 4: Debug — show resolved PDF paths (only when WP_DEBUG=true) ─
-		// Helps diagnose book_not_found errors during development.
-		// Disable in production by setting WP_DEBUG to false in wp-config.php.
+		// ── Route 5: Debug — show resolved PDF paths (only when WP_DEBUG=true) ─
 		register_rest_route(
 			self::NAMESPACE,
 			'/debug/book/(?P<book_id>\d+)',
@@ -143,12 +175,12 @@ class Print_API_Rest {
 	// ════════════════════════════════════════════════════════════════════════
 
 	/**
-	 * Issue a one-time download token for the requested book.
+	 * Issue a one-time book-level download token for the requested book.
 	 *
 	 * Request flow:
 	 *   1. Verify the WP REST nonce (CSRF protection).
 	 *   2. (Optional) Require the user to be logged in.
-	 *   3. Generate and return a token.
+	 *   3. Generate and return a book token.
 	 *
 	 * @param  WP_REST_Request $request  Full request object (params already validated by 'args').
 	 * @return WP_REST_Response|WP_Error
@@ -156,14 +188,9 @@ class Print_API_Rest {
 	public static function handle_token_request( WP_REST_Request $request ) {
 
 		// ── Step 1: Verify nonce ──────────────────────────────────────────────
-		// WordPress sends the nonce in the X-WP-Nonce header for REST requests.
-		// wp_verify_nonce() returns false (bad), 1 (valid, fresh), or 2 (valid, aging).
-		// We accept both 1 and 2 (truthy). "wp_rest" is the standard nonce action
-		// used by WordPress's own REST API infrastructure.
 		$nonce = $request->get_header( 'X-WP-Nonce' );
 
 		if ( ! $nonce || ! wp_verify_nonce( $nonce, 'wp_rest' ) ) {
-			// Return a 403 Forbidden with a machine-readable error code.
 			return new WP_Error(
 				'invalid_nonce',
 				'CSRF token missing or invalid. Please reload the page and try again.',
@@ -172,8 +199,6 @@ class Print_API_Rest {
 		}
 
 		// ── Step 2: Optional login check ─────────────────────────────────────
-		// Controlled by the PRINT_API_REQUIRE_LOGIN constant in print-api.php.
-		// Set it to true if only registered users should be allowed to download.
 		if ( PRINT_API_REQUIRE_LOGIN && ! is_user_logged_in() ) {
 			return new WP_Error(
 				'login_required',
@@ -182,12 +207,10 @@ class Print_API_Rest {
 			);
 		}
 
-		// ── Step 3: Generate token ────────────────────────────────────────────
-		// book_id was already validated and sanitized by the 'args' definition above.
+		// ── Step 3: Generate book token ───────────────────────────────────────
 		$book_id = $request->get_param( 'book_id' );
 		$token   = Print_API_Token_Manager::generate( $book_id );
 
-		// WP_REST_Response( data, status_code ) wraps our array in a proper JSON response.
 		return new WP_REST_Response(
 			array( 'token' => $token ),
 			200
@@ -199,10 +222,14 @@ class Print_API_Rest {
 	// ════════════════════════════════════════════════════════════════════════
 
 	/**
-	 * Exchange a one-time token for an array of 3 PDF part URLs.
+	 * Exchange a one-time book token for three one-time per-part tokens.
 	 *
-	 * After this call the token is permanently invalidated — a second call
-	 * with the same token will always receive a 401 error.
+	 * IMPORTANT: This endpoint returns tokens, NOT file URLs.
+	 * The client must call /download?token=<part-token> for each part to get
+	 * the actual bytes.  This ensures the real file paths are never exposed.
+	 *
+	 * After this call the book token is permanently invalidated.
+	 * Each returned part token is itself one-time and expires in TOKEN_TTL seconds.
 	 *
 	 * @param  WP_REST_Request $request
 	 * @return WP_REST_Response|WP_Error
@@ -211,13 +238,10 @@ class Print_API_Rest {
 
 		$token = $request->get_param( 'token' );
 
-		// ── Consume the token ─────────────────────────────────────────────────
-		// consume() deletes the transient and returns the book_id, or false if
-		// the token was invalid, expired, or already used.
-		$book_id = Print_API_Token_Manager::consume( $token );
+		// ── Consume the book token ────────────────────────────────────────────
+		$data = Print_API_Token_Manager::consume( $token );
 
-		if ( false === $book_id ) {
-			// 401 Unauthorized — the token didn't match anything valid.
+		if ( false === $data ) {
 			return new WP_Error(
 				'invalid_token',
 				'Token is invalid, expired, or has already been used.',
@@ -225,12 +249,21 @@ class Print_API_Rest {
 			);
 		}
 
-		// ── Resolve PDF parts ─────────────────────────────────────────────────
-		$parts = Print_API_PDF_Resolver::get_parts( $book_id );
+		// Reject part tokens being presented here — they belong to /download.
+		if ( isset( $data['part'] ) ) {
+			return new WP_Error(
+				'invalid_token',
+				'Token is invalid, expired, or has already been used.',
+				array( 'status' => 401 )
+			);
+		}
 
-		if ( false === $parts ) {
-			// The token was valid but there are no PDF files for this book.
-			// This is a server configuration issue, not the client's fault → 404.
+		$book_id = (int) $data['book_id'];
+
+		// ── Count how many parts exist for this book ──────────────────────────
+		$part_count = Print_API_PDF_Resolver::get_part_count( $book_id );
+
+		if ( 0 === $part_count ) {
 			return new WP_Error(
 				'book_not_found',
 				'PDF files for this book could not be located on the server.',
@@ -238,14 +271,103 @@ class Print_API_Rest {
 			);
 		}
 
-		// ── Return URLs ───────────────────────────────────────────────────────
+		// ── Issue one per-part token per PDF part ─────────────────────────────
+		// Each token is one-time and bound to a specific (book_id, part) pair.
+		// The client uses these tokens with the /download endpoint.
+		$part_tokens = array();
+		for ( $i = 1; $i <= $part_count; $i++ ) {
+			$part_tokens[] = Print_API_Token_Manager::generate( $book_id, $i );
+		}
+
 		return new WP_REST_Response(
 			array(
-				'parts'   => $parts,    // Array of 3 URL strings
-				'book_id' => $book_id,  // Echo back so client can double-check
+				'parts'      => $part_tokens,  // Array of N one-time part tokens
+				'part_count' => $part_count,
+				'book_id'    => $book_id,
 			),
 			200
 		);
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// Handler: GET /wp-json/print-api/v1/download?token=…
+	// ════════════════════════════════════════════════════════════════════════
+
+	/**
+	 * Consume a one-time part token and stream the PDF bytes to the client.
+	 *
+	 * This is the only way to get the file bytes — no permanent URL exists.
+	 * Once this endpoint is called with a valid token, the token is gone and
+	 * the same token cannot be used to download the file again.
+	 *
+	 * Flow:
+	 *  1. Consume the part token (validates + deletes atomically).
+	 *  2. Resolve the absolute filesystem path for (book_id, part).
+	 *  3. Send headers and stream the file bytes, then exit.
+	 *
+	 * @param  WP_REST_Request $request
+	 * @return WP_Error  Only returned on failure — on success we exit() after streaming.
+	 */
+	public static function handle_download_request( WP_REST_Request $request ) {
+
+		$token = $request->get_param( 'token' );
+
+		// ── Consume the part token ────────────────────────────────────────────
+		$data = Print_API_Token_Manager::consume( $token );
+
+		if ( false === $data ) {
+			return new WP_Error(
+				'invalid_token',
+				'Token is invalid, expired, or has already been used.',
+				array( 'status' => 401 )
+			);
+		}
+
+		// Only part tokens (which carry a 'part' key) are valid here.
+		// Reject book tokens that were accidentally sent to this endpoint.
+		if ( ! isset( $data['part'] ) ) {
+			return new WP_Error(
+				'invalid_token',
+				'Token is invalid, expired, or has already been used.',
+				array( 'status' => 401 )
+			);
+		}
+
+		$book_id  = (int) $data['book_id'];
+		$part_num = (int) $data['part'];
+
+		// ── Resolve file path ─────────────────────────────────────────────────
+		$path = Print_API_PDF_Resolver::get_part_path( $book_id, $part_num );
+
+		if ( false === $path ) {
+			return new WP_Error(
+				'book_not_found',
+				'PDF file for this part could not be located on the server.',
+				array( 'status' => 404 )
+			);
+		}
+
+		// ── Stream the file ───────────────────────────────────────────────────
+		// We send the bytes directly rather than redirecting to a URL.
+		// This means the real file path never reaches the client.
+		$filename = 'book_' . $book_id . '_part' . $part_num . '.pdf';
+
+		// Prevent any output buffering from truncating large files.
+		if ( ob_get_level() ) {
+			ob_end_clean();
+		}
+
+		header( 'Content-Type: application/pdf' );
+		header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+		header( 'Content-Length: ' . filesize( $path ) );
+		header( 'Cache-Control: no-store, no-cache, must-revalidate' );
+		header( 'Pragma: no-cache' );
+
+		// readfile() reads the file and writes it directly to the output buffer.
+		readfile( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_read_readfile
+
+		// exit prevents WordPress from appending anything after the file bytes.
+		exit;
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -254,9 +376,6 @@ class Print_API_Rest {
 
 	/**
 	 * Return a fresh WP REST nonce.
-	 *
-	 * Useful for single-page apps that need a nonce before the first page load
-	 * injects one via wp_localize_script.
 	 *
 	 * @param  WP_REST_Request $request
 	 * @return WP_REST_Response
@@ -276,9 +395,6 @@ class Print_API_Rest {
 	 * Show the resolved filesystem paths for a book.
 	 * Only works when WP_DEBUG is true. Returns 403 in production.
 	 *
-	 * Use this when you get book_not_found to see exactly which paths
-	 * the plugin is checking, so you can place your files correctly.
-	 *
 	 * @param  WP_REST_Request $request
 	 * @return WP_REST_Response|WP_Error
 	 */
@@ -291,13 +407,16 @@ class Print_API_Rest {
 			);
 		}
 
-		$book_id = $request->get_param( 'book_id' );
-		$upload  = wp_upload_dir();
-		$dir     = trailingslashit( $upload['basedir'] ) . 'print-api/book_' . $book_id;
+		$book_id    = $request->get_param( 'book_id' );
+		$upload     = wp_upload_dir();
+		$dir        = trailingslashit( $upload['basedir'] ) . 'print-api/book_' . $book_id;
+		$part_count = Print_API_PDF_Resolver::get_part_count( $book_id );
 
+		// Show all found parts plus the first missing one so the admin can see
+		// exactly where the sequence stops.
 		$files = array();
-		for ( $i = 1; $i <= 3; $i++ ) {
-			$path          = $dir . '/part' . $i . '.pdf';
+		for ( $i = 1; $i <= $part_count + 1; $i++ ) {
+			$path             = $dir . '/part' . $i . '.pdf';
 			$files[ 'part' . $i ] = array(
 				'expected_path' => $path,
 				'exists'        => file_exists( $path ),
@@ -309,6 +428,7 @@ class Print_API_Rest {
 				'book_id'       => $book_id,
 				'expected_dir'  => $dir,
 				'dir_exists'    => is_dir( $dir ),
+				'part_count'    => $part_count,
 				'files'         => $files,
 				'uploads_base'  => $upload['basedir'],
 			),

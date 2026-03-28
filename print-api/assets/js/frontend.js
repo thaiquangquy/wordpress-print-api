@@ -13,18 +13,21 @@
  *
  * So window.printApiConfig is always available here.
  *
- * How this works
- * ──────────────
+ * How this works (3-step protocol)
+ * ──────────────────────────────────
  * 1. User clicks a "Download" button that has data-book-id="123".
- * 2. We POST to /token with that book_id and the nonce.
- * 3. Server returns { token: "…" }.
- * 4. We redirect to app://print?token=… (deep link into a native app)
- *    OR call /pdf?token=… to get the download URLs directly in the browser.
+ * 2. POST /token  → server returns { token: "<book-token>" }   (one-time)
+ * 3. GET  /pdf?token=<book-token>
+ *         → server returns { parts: ["<part1-token>", "<part2-token>", "<part3-token>"] }
+ *            Each part token is also one-time. No file URLs are ever sent.
+ * 4. GET  /download?token=<part-token>  (once per part)
+ *         → server streams the PDF bytes directly.
  *
- * Both flows are shown below.
+ * Because the server streams bytes through /download, there is no persistent
+ * URL for the PDF files — every download requires a fresh one-time token.
  */
 
-( function () {
+(function () {
   'use strict';
 
   // ── Utility: request a one-time token from the server ──────────────────────
@@ -32,7 +35,7 @@
    * @param {number} bookId
    * @returns {Promise<string>} resolves to the token string
    */
-  async function requestToken( bookId ) {
+  async function requestToken(bookId) {
     const response = await fetch(
       printApiConfig.restUrl + '/token',   // e.g. https://example.com/wp-json/print-api/v1/token
       {
@@ -47,14 +50,14 @@
           'X-WP-Nonce': printApiConfig.nonce,
         },
 
-        body: JSON.stringify( { book_id: bookId } ),
+        body: JSON.stringify({ book_id: bookId }),
       }
     );
 
-    if ( ! response.ok ) {
+    if (!response.ok) {
       // Parse the WP_Error JSON body for a useful message.
-      const err = await response.json().catch( () => ({}) );
-      throw new Error( err.message || 'Failed to obtain download token.' );
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || 'Failed to obtain download token.');
     }
 
     const data = await response.json();
@@ -64,43 +67,58 @@
   // ── Flow A: Deep-link into a native app ────────────────────────────────────
   /**
    * Use this when your PDF viewer is a native app that registers the
-   * "app://" URL scheme.  The app receives the token and must then call
+   * "cyberthrone://" URL scheme.  The app receives the token and must then call
    * GET /wp-json/print-api/v1/pdf?token=… itself to get the download URLs.
    *
    * @param {number} bookId
    */
-  async function downloadViaAppDeepLink( bookId ) {
-    const token = await requestToken( bookId );
+  async function downloadViaAppDeepLink(bookId) {
+    const token = await requestToken(bookId);
 
     // Redirect the browser to a custom URL scheme.
     // The native app intercepts this and handles the download.
-    window.location.href = `app://print?token=${ token }`;
+    window.location.href = `cyberthrone://print?token=${token}`;
   }
 
-  // ── Flow B: Exchange the token in the browser, then download ──────────────
+  // ── Flow B: Full browser download (3-step) ────────────────────────────────
   /**
    * Use this for a pure-web flow where the browser itself downloads the PDFs.
-   * After getting the 3 part URLs you can open them in new tabs, feed them to
-   * a PDF merger library, etc.
+   *
+   * Step 1: Request a book token.
+   * Step 2: Exchange it for 3 per-part tokens (no file URLs are returned).
+   * Step 3: Navigate to /download?token=<part-token> for each part —
+   *         the server streams the bytes and the browser saves the file.
+   *
+   * NOTE: data.parts now contains one-time tokens, NOT file URLs.
+   *       Opening /download?token=… triggers the actual byte-stream download.
    *
    * @param {number} bookId
-   * @returns {Promise<string[]>} array of 3 PDF part URLs
+   * @returns {Promise<void>}
    */
-  async function downloadViaBrowser( bookId ) {
-    const token = await requestToken( bookId );
+  async function downloadViaBrowser(bookId) {
+    const bookToken = await requestToken(bookId);
 
+    // Exchange book token for per-part tokens.
     const response = await fetch(
-      printApiConfig.restUrl + '/pdf?token=' + encodeURIComponent( token )
+      printApiConfig.restUrl + '/pdf?token=' + encodeURIComponent(bookToken)
     );
 
-    if ( ! response.ok ) {
-      const err = await response.json().catch( () => ({}) );
-      throw new Error( err.message || 'Failed to exchange token for PDF.' );
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || 'Failed to exchange token for PDF parts.');
     }
 
     const data = await response.json();
-    // data.parts = ["https://.../part1.pdf", "https://.../part2.pdf", "https://.../part3.pdf"]
-    return data.parts;
+    // data.parts = ["<part1-token>", "<part2-token>", "<part3-token>"]
+    // Each token is one-time — navigate to /download to consume it and get the bytes.
+    data.parts.forEach(function (partToken) {
+      // Opening in a new tab triggers the browser's "save file" prompt because
+      // the server sends Content-Disposition: attachment.
+      window.open(
+        printApiConfig.restUrl + '/download?token=' + encodeURIComponent(partToken),
+        '_blank'
+      );
+    });
   }
 
   // ── Wire up buttons on the page ────────────────────────────────────────────
@@ -115,16 +133,16 @@
 
   const DOWNLOAD_FLOW = 'deeplink';   // 'deeplink' | 'browser'
 
-  document.addEventListener( 'DOMContentLoaded', function () {
+  document.addEventListener('DOMContentLoaded', function () {
     // Find every button/element that has a data-print-book attribute.
-    const buttons = document.querySelectorAll( '[data-print-book]' );
+    const buttons = document.querySelectorAll('[data-print-book]');
 
-    buttons.forEach( function ( button ) {
-      button.addEventListener( 'click', async function () {
-        const bookId = parseInt( button.dataset.printBook, 10 );
+    buttons.forEach(function (button) {
+      button.addEventListener('click', async function () {
+        const bookId = parseInt(button.dataset.printBook, 10);
 
-        if ( ! bookId || bookId < 1 ) {
-          console.error( 'Print API: invalid book ID on button', button );
+        if (!bookId || bookId < 1) {
+          console.error('Print API: invalid book ID on button', button);
           return;
         }
 
@@ -134,23 +152,23 @@
         button.textContent = 'Preparing download…';
 
         try {
-          if ( DOWNLOAD_FLOW === 'deeplink' ) {
-            await downloadViaAppDeepLink( bookId );
+          if (DOWNLOAD_FLOW === 'deeplink') {
+            await downloadViaAppDeepLink(bookId);
           } else {
-            const parts = await downloadViaBrowser( bookId );
+            const parts = await downloadViaBrowser(bookId);
             // In browser flow, open each PDF part in a new tab.
-            parts.forEach( ( url ) => window.open( url, '_blank' ) );
+            parts.forEach((url) => window.open(url, '_blank'));
           }
-        } catch ( error ) {
-          console.error( 'Print API error:', error );
-          alert( 'Download failed: ' + error.message );
+        } catch (error) {
+          console.error('Print API error:', error);
+          alert('Download failed: ' + error.message);
         } finally {
           // Re-enable button.
           button.disabled = false;
           button.textContent = originalText;
         }
-      } );
-    } );
-  } );
+      });
+    });
+  });
 
-} )();
+})();

@@ -3,9 +3,10 @@
  * Plugin Name:  Print API
  * Plugin URI:   https://example.com/print-api
  * Description:  Secure PDF download via short-lived single-use tokens.
- *               Exposes two REST endpoints:
- *                 POST /wp-json/print-api/v1/token  – issue a token for a book
- *                 GET  /wp-json/print-api/v1/pdf    – exchange token for PDF part URLs
+ *               Exposes three REST endpoints:
+ *                 POST /wp-json/print-api/v1/token    – issue a book token
+ *                 GET  /wp-json/print-api/v1/pdf      – exchange book token for per-part tokens
+ *                 GET  /wp-json/print-api/v1/download – consume part token, stream PDF bytes
  * Version:      1.0.0
  * Author:       Your Name
  * License:      GPL-2.0-or-later

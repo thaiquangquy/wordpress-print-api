@@ -12,11 +12,18 @@
  * When the TTL expires WordPress automatically discards the value.
  *
  * Key format:  print_api_token_{64-char-hex-token}
- * Value:       serialized PHP array  ['book_id' => int, 'created_at' => int]
+ * Value:       serialized PHP array  ['book_id' => int, 'part' => int|null, 'created_at' => int]
+ *
+ * Token types
+ * ───────────
+ * Book token  — issued by /token endpoint, no 'part' key in data.
+ *               Consumed by /pdf to mint per-part tokens.
+ * Part token  — issued by /pdf for each PDF part (1, 2, 3), has 'part' key.
+ *               Consumed by /download to stream the actual file bytes.
  *
  * Single-use guarantee
  * ────────────────────
- * consume() deletes the transient before returning the book_id.
+ * consume() deletes the transient before returning the data.
  * If two requests race, only the first delete succeeds; the second finds the
  * transient already gone and returns false — effectively locking out replays.
  * (WordPress's transient delete is not strictly atomic on all storage back-ends,
@@ -44,7 +51,7 @@ class Print_API_Token_Manager {
 	const KEY_PREFIX = 'print_api_token_';
 
 	/**
-	 * Generate a new one-time token for the given book.
+	 * Generate a new one-time token for the given book (and optionally a specific part).
 	 *
 	 * Steps:
 	 *  1. Generate 32 cryptographically random bytes (PHP 7+).
@@ -52,10 +59,12 @@ class Print_API_Token_Manager {
 	 *  3. Store in a transient that expires in TOKEN_TTL seconds.
 	 *  4. Return the token string to the caller.
 	 *
-	 * @param  int    $book_id  The book this token grants access to.
-	 * @return string           64-character hex token.
+	 * @param  int      $book_id  The book this token grants access to.
+	 * @param  int|null $part     If set, this is a part token locked to a specific
+	 *                            part number (1–3). Omit for a book-level token.
+	 * @return string             64-character hex token.
 	 */
-	public static function generate( $book_id ) {
+	public static function generate( $book_id, $part = null ) {
 		// random_bytes() uses the OS CSPRNG (/dev/urandom on Linux).
 		// bin2hex() converts the binary string to readable hex.
 		// Result: 64 hex chars = 256 bits of entropy → infeasible to guess.
@@ -67,6 +76,12 @@ class Print_API_Token_Manager {
 			'created_at' => time(),   // Unix timestamp — useful for audit logs
 		);
 
+		// Part tokens carry the part number so the download endpoint knows
+		// exactly which file to stream without any client-supplied parameters.
+		if ( null !== $part ) {
+			$data['part'] = (int) $part;
+		}
+
 		// set_transient( key, value, expiration_in_seconds )
 		// WordPress serializes $data automatically.
 		set_transient( self::KEY_PREFIX . $token, $data, self::TOKEN_TTL );
@@ -75,21 +90,24 @@ class Print_API_Token_Manager {
 	}
 
 	/**
-	 * Consume a token: validate it, delete it immediately, return the book_id.
+	 * Consume a token: validate it, delete it immediately, return the stored data.
 	 *
-	 * This is called when the client wants to exchange a token for PDF URLs.
+	 * This is called when the client wants to exchange a token for the next step.
 	 * "Consume" means the token is gone after this call regardless of outcome —
 	 * it can never be used again.
 	 *
 	 * Flow:
 	 *  1. Read the transient. If it doesn't exist (expired or already used) → false.
-	 *  2. Delete the transient BEFORE returning the book_id.
+	 *  2. Delete the transient BEFORE returning the data.
 	 *     Deleting first means: even if the code crashes after delete, the token
 	 *     is gone and cannot be replayed.
-	 *  3. Return the book_id so the caller knows which PDF to serve.
+	 *  3. Return the full data array so the caller can inspect book_id and part.
 	 *
-	 * @param  string    $token  The raw token string from the client.
-	 * @return int|false         book_id on success, false if token is invalid/expired/used.
+	 * @param  string      $token  The raw token string from the client.
+	 * @return array|false         Data array on success:
+	 *                               ['book_id' => int, 'created_at' => int]           (book token)
+	 *                               ['book_id' => int, 'part' => int, 'created_at' => int] (part token)
+	 *                             false if token is invalid/expired/used.
 	 */
 	public static function consume( $token ) {
 		// Sanitize: strip anything that isn't a hex character.
@@ -111,10 +129,10 @@ class Print_API_Token_Manager {
 
 		// ── Delete FIRST ──────────────────────────────────────────────────────
 		// Invalidate the token before we return anything.
-		// If we returned the book_id first and then crashed, the token would still
+		// If we returned the data first and then crashed, the token would still
 		// exist and could be replayed. Delete-first prevents that.
 		delete_transient( $key );
 
-		return (int) $data['book_id'];
+		return $data;
 	}
 }
