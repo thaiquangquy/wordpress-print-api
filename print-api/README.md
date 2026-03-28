@@ -1,457 +1,218 @@
 # Print API — WordPress Plugin
 
-Secure PDF download via short-lived, single-use tokens.
-
-## How It Works
-
-```
-Browser                          WordPress Plugin                    Disk
-───────                          ────────────────                    ────
-[Click Download]
-    │
-    ├─ POST /wp-json/print-api/v1/token ──────────────────────────►
-    │    body: { book_id: 123 }          verify nonce
-    │    header: X-WP-Nonce: …           generate token (5 min TTL)
-    │                                    store in WP Transient
-    │◄─ { token: "a3f9…" } ─────────────────────────────────────────
-    │
-    ├─ redirect: app://print?token=a3f9…   (deep-link to native app)
-    │         OR
-    ├─ GET /wp-json/print-api/v1/pdf?token=a3f9… ────────────────►
-    │                                    validate token
-    │                                    DELETE token (now invalid)
-    │                                    resolve book → 3 file paths ──► part1.pdf
-    │◄─ { parts: ["url1","url2","url3"] } ───────────────────────────    part2.pdf
-                                                                         part3.pdf
-```
-
-**Token properties:**
-- 256-bit cryptographic entropy (`random_bytes(32)`)
-- 5-minute expiry (WP Transient TTL)
-- Single-use — deleted on first exchange, replay always returns 401
+Secure, token-gated PDF delivery for multi-part books. Every download requires a fresh one-time token chain; no permanent file URL is ever exposed to a client.
 
 ---
 
-## File Structure
+## Architecture
 
 ```
-print-api/
-├── print-api.php                   # Plugin header, constants, hooks
-├── includes/
-│   ├── class-token-manager.php     # Token generate / consume (WP Transients)
-│   ├── class-rest-api.php          # REST route registration + handlers
-│   └── class-pdf-resolver.php      # Maps book_id → 3 PDF file URLs
-└── assets/
-    └── js/
-        └── frontend.js             # Browser-side fetch + button wiring
+┌─────────────────────┐     ┌──────────────────────────┐     ┌──────────────────┐
+│   WordPress Site    │     │   Print API REST Layer   │     │   Electron App   │
+│  (browser / page)   │     │   (this plugin)          │     │  (desktop client)│
+└────────┬────────────┘     └────────────┬─────────────┘     └────────┬─────────┘
+         │                               │                             │
+         │  1. POST /token               │                             │
+         │  {book_id, X-WP-Nonce} ──────►│ verify nonce + login       │
+         │◄──────────────────────────────│ issue book token (5 min)   │
+         │  {token: "<book-token>"}      │                             │
+         │                               │                             │
+         │  2. cyberthrone://print       │                             │
+         │     ?token=<book-token> ──────┼────────────────────────────►
+         │     (OS deep link)            │                             │
+         │                               │                             │
+         │                               │  3. GET /pdf               │
+         │                               │     ?token=<book-token> ◄──│
+         │                               │  consume book token        │
+         │                               │  count parts on disk       │
+         │                               │  issue N part tokens ──────►
+         │                               │  {parts:[t1,t2…tN]}        │
+         │                               │                             │
+         │                               │  4. GET /download          │
+         │                               │     ?token=<part-token> ◄──│ (once per part)
+         │                               │  consume part token        │
+         │                               │  stream PDF bytes ─────────►
+         │                               │                             │ save partN.pdf
 ```
+
+### Components
+
+| Component | File | Responsibility |
+|-----------|------|----------------|
+| Plugin bootstrap | `print-api.php` | Constants, hook registration, script enqueue, activation |
+| Token Manager | `includes/class-token-manager.php` | Generate and consume one-time tokens via WP Transients |
+| PDF Resolver | `includes/class-pdf-resolver.php` | Map book ID + part number to a server-side file path |
+| REST API | `includes/class-rest-api.php` | Route registration and request handlers |
+| Frontend script | `assets/js/frontend.js` | Button wiring, token request, deep-link dispatch |
 
 ---
 
-## REST Endpoints
+## Download workflow
 
-### `POST /wp-json/print-api/v1/token`
+### Step 1 — Issue a book token (browser → WordPress)
 
-Issue a one-time download token.
+The visitor clicks a button on a WordPress page. The bundled JavaScript calls `POST /token` with the book ID and the WordPress REST nonce. The server verifies the nonce (and optionally that the user is logged in), then creates a one-time book token stored as a short-lived transient (default 5 minutes).
 
-**Headers**
+### Step 2 — Hand off to the desktop app (browser → OS)
+
+The browser is redirected to a custom URL scheme:
+
 ```
-Content-Type: application/json
-X-WP-Nonce: <nonce>
-```
-
-**Body**
-```json
-{ "book_id": 123 }
+cyberthrone://print?token=<book-token>
 ```
 
-**Response 200**
-```json
-{ "token": "a3f9c2…" }
-```
+The OS recognises the scheme, wakes or focuses the Electron app, and passes the URL to it. The browser's involvement ends here.
 
-**Response 403** — missing or bad nonce
-```json
-{ "code": "invalid_nonce", "message": "CSRF token missing or invalid…" }
-```
+### Step 3 — Exchange the book token for part tokens (Electron → WordPress)
+
+The app calls `GET /pdf?token=<book-token>`. The server:
+
+1. Validates and **immediately deletes** the book token (it can never be used again).
+2. Counts how many consecutive `part1.pdf … partN.pdf` files exist on disk for that book.
+3. Mints one fresh one-time part token per file.
+4. Returns the part token array and the part count.
+
+The response contains tokens, **not file URLs** — the real paths never leave the server.
+
+### Step 4 — Download each part (Electron → WordPress)
+
+For each part token the app calls `GET /download?token=<part-token>`. The server validates and deletes the part token, then streams the raw PDF bytes directly. The app writes each stream to disk.
 
 ---
 
-### `GET /wp-json/print-api/v1/pdf?token=<token>`
+## Token design
 
-Exchange a token for 3 PDF part URLs. The token is invalidated immediately.
+| Property | Value |
+|----------|-------|
+| Entropy | 256 bits (`random_bytes(32)`) |
+| Format | 64-character lowercase hex string |
+| Storage | WordPress Transients (database or object cache) |
+| TTL | 5 minutes (configurable) |
+| Single-use | Token is deleted before the response is sent |
 
-**Response 200**
-```json
-{
-  "parts": [
-    "https://example.com/wp-content/uploads/print-api/book_123/part1.pdf",
-    "https://example.com/wp-content/uploads/print-api/book_123/part2.pdf",
-    "https://example.com/wp-content/uploads/print-api/book_123/part3.pdf"
-  ],
-  "book_id": 123
-}
-```
+### Two token types
 
-**Response 401** — token invalid, expired, or already used
-```json
-{ "code": "invalid_token", "message": "Token is invalid, expired, or has already been used." }
-```
+**Book token** — produced by `POST /token`, consumed by `GET /pdf`. Proves the browser session was authenticated and authorised for a specific book.
 
-**Response 404** — token valid but PDF files missing on disk
-```json
-{ "code": "book_not_found", "message": "PDF files for this book could not be located on the server." }
-```
+**Part token** — produced by `GET /pdf` (one per part), consumed by `GET /download`. Each token is bound server-side to a specific `(book_id, part_number)` pair. The client cannot request a different part with someone else's token.
 
 ---
 
-### `GET /wp-json/print-api/v1/nonce`
-
-Return a fresh WP REST nonce. Useful for SPAs that need a nonce before the first page load.
-
-**Response 200**
-```json
-{ "nonce": "abc123…" }
-```
-
----
-
-## Configuration
-
-All configuration is in `print-api.php` via constants:
-
-| Constant | Default | Description |
-|---|---|---|
-| `PRINT_API_REQUIRE_LOGIN` | `false` | Set to `true` to require a logged-in WordPress session before a token can be issued |
-| `Print_API_Token_Manager::TOKEN_TTL` | `300` | Token lifetime in seconds (change in `class-token-manager.php`) |
-
----
-
-## PDF File Layout
-
-PDFs must be placed in the WordPress uploads directory:
+## Book file layout
 
 ```
 wp-content/uploads/print-api/
 └── book_{id}/
     ├── part1.pdf
     ├── part2.pdf
-    └── part3.pdf
+    └── partN.pdf          ← any number of parts
 ```
 
-The plugin creates this directory and a blocking `.htaccess` on activation, so files are **not** directly downloadable via HTTP — they can only be accessed through the token flow.
-
-To add a new book just create the folder and drop in 3 PDF parts. No code change required.
+- The directory name must match the numeric book ID used in the download button.
+- Parts must be named `part1.pdf`, `part2.pdf`, … with no gaps. The plugin counts them by walking the sequence until the first missing number.
+- The directory is protected by `.htaccess` on activation so direct HTTP access returns 403. Files are only reachable through the streaming endpoint.
 
 ---
 
-## Frontend Usage
+## REST endpoints
 
-### Add a download button
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `POST` | `/wp-json/print-api/v1/token` | WP nonce + optional login | Issue a book token |
+| `GET` | `/wp-json/print-api/v1/pdf` | Book token (query param) | Exchange for N part tokens |
+| `GET` | `/wp-json/print-api/v1/download` | Part token (query param) | Stream PDF bytes |
+| `GET` | `/wp-json/print-api/v1/nonce` | None | Fetch a fresh WP nonce |
+| `GET` | `/wp-json/print-api/v1/debug/book/{id}` | `WP_DEBUG=true` | Inspect expected file paths |
 
-Add `data-print-book="<book_id>"` to any element:
+---
 
-```html
-<button data-print-book="123">Download Book</button>
+## Configuration
+
+| Constant / Setting | Location | Default | Effect |
+|--------------------|----------|---------|--------|
+| `PRINT_API_REQUIRE_LOGIN` | `print-api.php` | `true` | When `true`, only logged-in users can call `POST /token` |
+| `TOKEN_TTL` | `class-token-manager.php` | `300` (5 min) | Seconds before any token expires |
+| `DOWNLOAD_FLOW` | `assets/js/frontend.js` | `'deeplink'` | `'deeplink'` fires the `cyberthrone://` URL; `'browser'` downloads directly in the browser |
+
+---
+
+## Edge cases
+
+### Token consumed but network fails before app receives the response
+
+The book token is deleted before the response is sent. If a network failure prevents the app from receiving the part tokens, the book token is gone. The user must go back to the WordPress page and click the download button again to get a new book token.
+
+**Mitigation:** Display a clear "download failed — please try again" message in the app and guide the user back to the website.
+
+### Part download interrupted mid-stream
+
+A part token is consumed when `GET /download` is called. If the connection drops after the token is validated but before all bytes are sent, that part token is gone. The remaining part tokens (not yet called) are still valid.
+
+**Mitigation:** Track which parts have been fully saved. On failure, inform the user which parts succeeded and which need to be re-downloaded — requiring a new full token flow for the failed parts only if their tokens have been consumed.
+
+### Token TTL expires before all parts are downloaded
+
+All part tokens are minted at the same moment (`GET /pdf`). If downloading many large parts takes longer than the TTL (default 5 minutes), later part tokens will be expired by the time they are used.
+
+**Mitigation:** Increase `TOKEN_TTL` for books with many or large parts. As a rule of thumb, set the TTL to at least 2× the expected total download time at the slowest expected connection speed.
+
+### Double-click or duplicate deep-link activation
+
+If the user clicks the download button twice in quick succession, two book tokens are issued. The first `cyberthrone://` redirect will be handled by the app; the second token will expire unused after the TTL.
+
+**Mitigation:** The frontend disables the button for the duration of the token request. On the app side, guard against processing two deep links for the same book simultaneously.
+
+### Book token presented to `/download` (wrong endpoint)
+
+Part tokens carry an internal `part` field; book tokens do not. Both `/pdf` and `/download` inspect this field and reject tokens of the wrong type with a `401 invalid_token` response.
+
+### Part token presented to `/pdf` (wrong endpoint)
+
+Same as above — `/pdf` rejects any token that contains a `part` field.
+
+### Race condition on single-use enforcement
+
+Two requests arriving with the same token within milliseconds could theoretically both read the transient before either deletes it. The plugin deletes the transient before returning data. On most WordPress transient back-ends (database) this is sufficient; on some object-cache back-ends it is not strictly atomic. For high-traffic production use, replace the transient store with a database row and a `SELECT … FOR UPDATE` or similar atomic operation.
+
+### Book files added or removed between `/token` and `/pdf`
+
+If an admin removes a book's directory between the time the book token was issued and the time the app calls `/pdf`, the server will count 0 parts and return `404 book_not_found`. The book token is still consumed.
+
+### Nonce expiry (browser session)
+
+WordPress REST nonces are valid for 12 hours. If a visitor leaves a page open overnight and clicks the download button the next morning, the nonce will be invalid and `POST /token` returns `403 invalid_nonce`. The page must be refreshed to get a new nonce.
+
+---
+
+## Security model summary
+
 ```
-
-The bundled `frontend.js` finds these automatically and handles the full token flow on click.
-
-### Choose the download flow
-
-In `assets/js/frontend.js`, change this line:
-
-```js
-const DOWNLOAD_FLOW = 'deeplink';   // 'deeplink' | 'browser'
-```
-
-| Value | Behaviour |
-|---|---|
-| `'deeplink'` | Redirects to `app://print?token=…` — native app handles the download |
-| `'browser'`  | Exchanges token in the browser and opens each PDF part in a new tab |
-
-### Manual fetch (custom UI)
-
-```js
-// Nonce and REST URL are injected by WordPress via wp_localize_script()
-const res = await fetch('/wp-json/print-api/v1/token', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-WP-Nonce': printApiConfig.nonce,
-  },
-  body: JSON.stringify({ book_id: 123 }),
-});
-const { token } = await res.json();
-
-// Option A — deep link to native app
-window.location.href = `app://print?token=${token}`;
-
-// Option B — exchange for PDF URLs in the browser
-const pdfRes = await fetch(`/wp-json/print-api/v1/pdf?token=${token}`);
-const { parts } = await pdfRes.json();
-// parts = ["https://.../part1.pdf", "https://.../part2.pdf", "https://.../part3.pdf"]
+What is protected          How
+─────────────────────────  ──────────────────────────────────────────────────────
+PDF file paths             Never sent to any client; only used server-side
+PDF file bytes             Only served through the streaming endpoint with a valid token
+Token forgery              256-bit random token, infeasible to guess
+Token replay               Deleted before the response is sent (delete-first policy)
+Token theft and reuse      5-minute TTL limits the replay window
+CSRF on token issuance     WordPress REST nonce required on POST /token
+Unauthenticated access     PRINT_API_REQUIRE_LOGIN blocks anonymous token requests
+Direct file download       .htaccess denies all direct HTTP access to the uploads folder
 ```
 
 ---
 
-## Local Testing (LocalWP on Windows + WSL2)
-
-This guide assumes LocalWP runs on **Windows** and you run `curl` commands from **WSL2**.
-`mysite.local` is registered in the Windows hosts file but not in WSL2, so you need
-to route requests through the Windows host IP.
-
-### 1. Install LocalWP and create a site
-
-Download from https://localwp.com/, create a new site named `mysite` so the URL is `mysite.local`.
-
-### 2. Copy the plugin from WSL2 to LocalWP
-
-LocalWP stores its files under `C:\Users\<you>\Local Sites\`. From WSL2 that path is
-`/mnt/c/Users/<you>/Local Sites/`. Adjust the username in the path:
-
-```bash
-cp -r /path/to/print-api "/mnt/c/Users/<you>/Local Sites/mysite/app/public/wp-content/plugins/"
-```
-
-### 3. Activate in WP Admin
-
-Go to **WP Admin → Plugins** and click **Activate** next to "Print API".
-
-Also confirm pretty permalinks are enabled — without them the REST API returns 404:
-**WP Admin → Settings → Permalinks → select "Post name" → Save Changes**
-
-### 4. Upload PDF files
-
-The plugin expects files named exactly `part1.pdf`, `part2.pdf`, `part3.pdf` inside
-a folder named `book_{id}`. Create the folder and drop in the files from Windows Explorer:
+## File structure
 
 ```
-C:\Users\<you>\Local Sites\mysite\app\public\wp-content\uploads\print-api\book_123\part1.pdf
-C:\Users\<you>\Local Sites\mysite\app\public\wp-content\uploads\print-api\book_123\part2.pdf
-C:\Users\<you>\Local Sites\mysite\app\public\wp-content\uploads\print-api\book_123\part3.pdf
+print-api/
+├── print-api.php                   # Plugin header, constants, hooks, activation
+├── includes/
+│   ├── class-token-manager.php     # Token generate / consume (WP Transients)
+│   ├── class-rest-api.php          # REST route registration and handlers
+│   └── class-pdf-resolver.php      # Resolves book_id + part number to a file path
+├── assets/
+│   └── js/
+│       └── frontend.js             # Button wiring, token request, deep-link dispatch
+├── INTEGRATION.md                  # Step-by-step guide for WordPress admins and Electron developers
+└── deploy-local.sh                 # Sync plugin to a LocalWP site on Windows (WSL2)
 ```
-
-Or create placeholder files from WSL2 for a quick test:
-
-```bash
-DIR="/mnt/c/Users/<you>/Local Sites/mysite/app/public/wp-content/uploads/print-api/book_123"
-mkdir -p "$DIR"
-for i in 1 2 3; do
-  echo "%PDF-1.4 placeholder" > "$DIR/part${i}.pdf"
-done
-```
-
-### 5. Find the Windows host IP from WSL2
-
-WSL2 cannot resolve `mysite.local` directly. Use curl's `--resolve` flag to point
-the hostname at the Windows gateway IP so requests reach LocalWP:
-
-```bash
-# Get the Windows host IP (this is the gateway WSL2 uses to reach Windows)
-WINDOWS_IP=$(ip route show | grep default | awk '{print $3}')
-echo "Windows IP: $WINDOWS_IP"
-# Typically something like 172.18.80.1
-
-# Verify the site is reachable
-curl -s --resolve "mysite.local:80:$WINDOWS_IP" 'http://mysite.local/wp-json/' \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print('REST OK:', d['name'])"
-# Expected: REST OK: mysite
-```
-
-If you get a JSON parse error instead of "REST OK", pretty permalinks are not enabled
-(see step 3).
-
-### 6. Set the RESOLVE helper variable
-
-Put this at the top of your shell session so every curl command below uses it automatically:
-
-```bash
-WINDOWS_IP=$(ip route show | grep default | awk '{print $3}')
-RESOLVE="--resolve mysite.local:80:$WINDOWS_IP"
-```
-
-### 7. Get a nonce
-
-No login is required because `PRINT_API_REQUIRE_LOGIN` is `false` by default.
-WordPress generates a valid nonce for anonymous users. The only rule is that the nonce
-request and the token request must happen in the **same user context** — here both are
-anonymous (no session cookie), so WordPress sees `user_id=0` for both and verification passes.
-
-```bash
-NONCE=$(curl -s $RESOLVE 'http://mysite.local/wp-json/print-api/v1/nonce' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['nonce'])")
-echo "Nonce: [$NONCE]"
-# Expected: Nonce: [a1b2c3d4e5]
-```
-
-### 8. Get a token
-
-```bash
-TOKEN=$(curl -s $RESOLVE \
-  -X POST 'http://mysite.local/wp-json/print-api/v1/token' \
-  -H "Content-Type: application/json" \
-  -H "X-WP-Nonce: $NONCE" \
-  -d '{"book_id": 123}' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-echo "Token: [$TOKEN]"
-# Expected: Token: [64-char hex string]
-```
-
-### 9. Exchange token for PDF URLs
-
-```bash
-# First call — succeeds and returns 3 URLs
-curl -s $RESOLVE "http://mysite.local/wp-json/print-api/v1/pdf?token=$TOKEN" \
-  | python3 -m json.tool
-```
-
-Expected:
-```json
-{
-    "parts": [
-        "http://mysite.local/wp-content/uploads/print-api/book_123/part1.pdf",
-        "http://mysite.local/wp-content/uploads/print-api/book_123/part2.pdf",
-        "http://mysite.local/wp-content/uploads/print-api/book_123/part3.pdf"
-    ],
-    "book_id": 123
-}
-```
-
-```bash
-# Second call with the same token — must be rejected (single-use guarantee)
-curl -s $RESOLVE "http://mysite.local/wp-json/print-api/v1/pdf?token=$TOKEN" \
-  | python3 -m json.tool
-```
-
-Expected:
-```json
-{
-    "code": "invalid_token",
-    "message": "Token is invalid, expired, or has already been used.",
-    "data": {"status": 401}
-}
-```
-
-### 10. Debug: find out what path the plugin expects
-
-If you get `book_not_found`, enable WP_DEBUG in `wp-config.php` and call the debug endpoint
-to see the exact filesystem path and which files are missing:
-
-```bash
-# 1. In wp-config.php, temporarily change:  define('WP_DEBUG', false)  →  define('WP_DEBUG', true)
-
-# 2. Call the debug endpoint
-curl -s $RESOLVE "http://mysite.local/wp-json/print-api/v1/debug/book/123" \
-  | python3 -m json.tool
-# Returns: expected_dir, dir_exists, and per-file exists flags
-
-# 3. Revert WP_DEBUG back to false when done
-```
-
-### 11. Test the frontend button
-
-Add this HTML to any WordPress page (use the HTML block in Gutenberg):
-
-```html
-<button data-print-book="123">Download Book</button>
-```
-
-Open the page in the browser, open **DevTools → Network tab**, click the button, and
-watch two requests fire in sequence: `POST /token` then `GET /pdf?token=…`.
-
----
-
-## VPS Deployment
-
-### Prerequisites on the VPS
-
-- WordPress installed (e.g., at `/var/www/html`)
-- PHP 7.4+ (for `random_bytes`)
-- WP-CLI installed (`wp --info` should work)
-- SSH access
-
-### 1. Upload the plugin
-
-Run this from your local machine:
-
-```bash
-rsync -avz ./print-api/ user@your-vps:/var/www/html/wp-content/plugins/print-api/
-```
-
-### 2. Upload PDF files
-
-```bash
-rsync -avz ./pdfs/book_123/ user@your-vps:/var/www/html/wp-content/uploads/print-api/book_123/
-```
-
-The directory structure on the VPS must be:
-```
-/var/www/html/wp-content/uploads/print-api/book_123/part1.pdf
-/var/www/html/wp-content/uploads/print-api/book_123/part2.pdf
-/var/www/html/wp-content/uploads/print-api/book_123/part3.pdf
-```
-
-### 3. Activate the plugin
-
-SSH into the VPS and run:
-
-```bash
-ssh user@your-vps
-wp plugin activate print-api --path=/var/www/html
-```
-
-Activation also creates the uploads directory and `.htaccess` protection automatically.
-
-### 4. Verify with curl
-
-Replace `mysite.local` with your actual domain:
-
-```bash
-# Get nonce (anonymous — no login needed when PRINT_API_REQUIRE_LOGIN=false)
-NONCE=$(curl -s 'https://example.com/wp-json/print-api/v1/nonce' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['nonce'])")
-echo "Nonce: [$NONCE]"
-
-# Get token (same anonymous context — no session cookie)
-TOKEN=$(curl -s \
-  -X POST 'https://example.com/wp-json/print-api/v1/token' \
-  -H "Content-Type: application/json" \
-  -H "X-WP-Nonce: $NONCE" \
-  -d '{"book_id": 123}' \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-echo "Token: [$TOKEN]"
-
-# Exchange token for PDF URLs
-curl "https://example.com/wp-json/print-api/v1/pdf?token=$TOKEN"
-```
-
-### 5. Nginx — allow REST API (if blocked)
-
-If you use Nginx and the REST API returns 404, add this inside your `server {}` block:
-
-```nginx
-location /wp-json/ {
-    try_files $uri $uri/ /index.php?$args;
-}
-```
-
-Then reload: `sudo nginx -s reload`
-
----
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `curl: Failed to connect` from WSL2 | `mysite.local` not in WSL2 hosts | Use `--resolve mysite.local:80:$(ip route show \| grep default \| awk '{print $3}')` |
-| JSON parse error on REST check | Pretty permalinks disabled | WP Admin → Settings → Permalinks → select "Post name" → Save |
-| `$NONCE` is empty | REST API returned an error instead of JSON | Run `curl -s $RESOLVE http://mysite.local/wp-json/print-api/v1/nonce` raw to see the actual error |
-| 403 `invalid_nonce` | Nonce fetched while logged in but token called without cookies (user context mismatch) | Fetch nonce and call `/token` without any session cookie — both anonymous |
-| 403 `invalid_nonce` | Nonce older than 12 hours | Re-fetch nonce and use immediately |
-| 404 `book_not_found` | Files don't exist at the expected path | Enable `WP_DEBUG=true`, call `/debug/book/123` to see exact expected paths and which files are missing |
-| 404 `book_not_found` | Files named `part_1.pdf` instead of `part1.pdf` | Rename to `part1.pdf`, `part2.pdf`, `part3.pdf` (no underscore between "part" and the number) |
-| 404 on any `/wp-json/…` route | Pretty permalinks disabled | WP Admin → Settings → Permalinks → save any option except "Plain" |
-| 401 `invalid_token` on first use | Token TTL elapsed (>5 min between steps) | Re-run from the nonce step; or increase `TOKEN_TTL` in `class-token-manager.php` |
-| Plugin not showing in WP Admin | Wrong folder name | Folder inside `plugins/` must be named `print-api` and contain `print-api.php` |
-| Direct PDF URL returns 403 | `.htaccess` blocking direct access | This is expected — files must be accessed through the token flow, not directly |
