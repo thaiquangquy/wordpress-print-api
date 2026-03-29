@@ -110,11 +110,19 @@ class Print_API_Rest {
 				'callback'            => array( __CLASS__, 'handle_pdf_request' ),
 				'permission_callback' => '__return_true',
 				'args'                => array(
-					'token' => array(
+					'token'   => array(
 						'required'          => true,
 						'type'              => 'string',
 						'sanitize_callback' => 'sanitize_text_field',
-						'description'       => 'The one-time book token issued by the /token endpoint.',
+						'description'       => 'The one-time book token issued by the /token endpoint, or the dev master token.',
+					),
+					// book_id is only used when presenting the dev master token.
+					'book_id' => array(
+						'required'          => false,
+						'type'              => 'integer',
+						'minimum'           => 1,
+						'sanitize_callback' => 'absint',
+						'description'       => 'Required when using the dev master token; ignored otherwise.',
 					),
 				),
 			)
@@ -236,29 +244,46 @@ class Print_API_Rest {
 	 */
 	public static function handle_pdf_request( WP_REST_Request $request ) {
 
-		$token = $request->get_param( 'token' );
+		$token        = $request->get_param( 'token' );
+		$master_token = PRINT_API_DEV_MASTER_TOKEN;
+		$is_master    = $master_token !== ''
+						&& defined( 'WP_DEBUG' ) && WP_DEBUG
+						&& hash_equals( $master_token, $token );
 
-		// ── Consume the book token ────────────────────────────────────────────
-		$data = Print_API_Token_Manager::consume( $token );
+		if ( $is_master ) {
+			// ── Dev master token path ─────────────────────────────────────────
+			// Never consumed — reusable across test runs. Requires book_id param.
+			$book_id = absint( $request->get_param( 'book_id' ) );
+			if ( ! $book_id ) {
+				return new WP_Error(
+					'missing_book_id',
+					'book_id query parameter is required when using the master token.',
+					array( 'status' => 400 )
+				);
+			}
+		} else {
+			// ── Normal path: consume the one-time book token ──────────────────
+			$data = Print_API_Token_Manager::consume( $token );
 
-		if ( false === $data ) {
-			return new WP_Error(
-				'invalid_token',
-				'Token is invalid, expired, or has already been used.',
-				array( 'status' => 401 )
-			);
+			if ( false === $data ) {
+				return new WP_Error(
+					'invalid_token',
+					'Token is invalid, expired, or has already been used.',
+					array( 'status' => 401 )
+				);
+			}
+
+			// Reject part tokens being presented here — they belong to /download.
+			if ( isset( $data['part'] ) ) {
+				return new WP_Error(
+					'invalid_token',
+					'Token is invalid, expired, or has already been used.',
+					array( 'status' => 401 )
+				);
+			}
+
+			$book_id = (int) $data['book_id'];
 		}
-
-		// Reject part tokens being presented here — they belong to /download.
-		if ( isset( $data['part'] ) ) {
-			return new WP_Error(
-				'invalid_token',
-				'Token is invalid, expired, or has already been used.',
-				array( 'status' => 401 )
-			);
-		}
-
-		$book_id = (int) $data['book_id'];
 
 		// ── Count how many parts exist for this book ──────────────────────────
 		$part_count = Print_API_PDF_Resolver::get_part_count( $book_id );

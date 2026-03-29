@@ -33,6 +33,23 @@ define( 'PRINT_API_DIR',           plugin_dir_path( __FILE__ ) );
 define( 'PRINT_API_URL',           plugin_dir_url( __FILE__ ) );
 define( 'PRINT_API_REQUIRE_LOGIN', true );    // ← only logged-in users can request a token
 
+// ─── Development master token ────────────────────────────────────────────────
+// A non-expiring token for local development/testing. ONLY works when WP_DEBUG
+// is true, so it is harmless if accidentally left in a staging config.
+//
+// To enable, add this line to your wp-config.php (before "That's all, stop editing"):
+//
+//   define( 'PRINT_API_DEV_MASTER_TOKEN', 'your-secret-dev-token' );
+//
+// Then call the /pdf endpoint with:
+//   GET /wp-json/print-api/v1/pdf?token=your-secret-dev-token&book_id=42
+//
+// The master token is NEVER consumed, so you can reuse it across test runs.
+// Leave undefined (or define as empty string) to keep this feature disabled.
+if ( ! defined( 'PRINT_API_DEV_MASTER_TOKEN' ) ) {
+	define( 'PRINT_API_DEV_MASTER_TOKEN', '' );
+}
+
 // ─── Load class files ────────────────────────────────────────────────────────
 // require_once makes sure each file is included exactly once even if something
 // tries to load it again.
