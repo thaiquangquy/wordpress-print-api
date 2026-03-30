@@ -97,11 +97,19 @@ Issues a one-time book-level download token. Requires the user to be logged in (
 { "book_id": 42 }
 ```
 
+To request the light-book variant (`light.pdf` only):
+
+```json
+{ "book_id": 42, "light_book": true }
+```
+
 **Response `200`**
 
 ```json
 { "token": "a3f8...64hexchars" }
 ```
+
+The `light_book` flag is encoded inside the token — the response shape is identical regardless of the flag.
 
 **Error responses**
 
@@ -138,12 +146,22 @@ Consumes the book token and returns one one-time download token per PDF part.
 
 `parts` is an array of `part_count` one-time tokens. `parts[0]` is for part 1, `parts[1]` for part 2, and so on.
 
+For a **light-book token** the response is always `part_count: 1` with a single token that resolves to `light.pdf`:
+
+```json
+{
+  "book_id": 42,
+  "part_count": 1,
+  "parts": ["c7d8...64hexchars"]
+}
+```
+
 **Error responses**
 
 | HTTP | Code | Meaning |
 |------|------|---------|
 | 401 | `invalid_token` | Token is invalid, expired, already used, or is a part token (not a book token) |
-| 404 | `book_not_found` | No PDF files found on disk for this book ID |
+| 404 | `book_not_found` | No PDF files found on disk for this book ID (or `light.pdf` missing for a light-book token) |
 
 ---
 
@@ -166,6 +184,12 @@ Content-Type: application/pdf
 Content-Disposition: attachment; filename="book_42_part1.pdf"
 Content-Length: <bytes>
 Cache-Control: no-store, no-cache, must-revalidate
+```
+
+For a light-book part token the filename is `light.pdf`:
+
+```
+Content-Disposition: attachment; filename="light.pdf"
 ```
 
 **Error responses**
@@ -198,7 +222,7 @@ Returns the expected file paths and existence status for a book. **Only availabl
 ```json
 {
   "book_id": 42,
-  "expected_dir": "/var/www/html/wp-content/uploads/print-api/book_42",
+  "expected_dir": "/var/www/html/wp-content/uploads/private/books/42",
   "dir_exists": true,
   "part_count": 3,
   "files": {
@@ -231,17 +255,19 @@ On activation the plugin creates `wp-content/uploads/print-api/` and writes an `
 For each book, create a numbered subdirectory and drop in the PDF parts:
 
 ```
-wp-content/uploads/print-api/
-└── book_42/
+wp-content/uploads/private/books/
+└── 42/
     ├── part1.pdf
     ├── part2.pdf
-    └── part3.pdf        ← any number of parts is supported
+    ├── part3.pdf        ← any number of parts is supported
+    └── light.pdf        ← optional lightweight variant
 ```
 
 **Rules:**
 
-- The directory name must be `book_` followed by the book's numeric WordPress post/product ID (or any integer you choose to use as a stable identifier).
+- The directory name is the book's numeric WordPress post/product ID (or any integer you choose to use as a stable identifier).
 - Parts must be named `part1.pdf`, `part2.pdf`, … `partN.pdf` with no gaps. The plugin counts them automatically by walking the sequence until the first missing file.
+- `light.pdf` is optional. It is only served when the download button has `data-light-book="true"`. If a light-book token is requested but `light.pdf` is missing, the `/pdf` endpoint returns `404`.
 - There is no upper limit on the number of parts.
 
 ---
@@ -262,20 +288,37 @@ The plugin automatically wires up any HTML element that has a `data-print-book` 
 </button>
 ```
 
+To offer a light-book download (serves `light.pdf` only), also add `data-light-book="true"`:
+
+```html
+<button class="wp-block-button__link" data-print-book="42" data-light-book="true">
+  Download Light Version
+</button>
+```
+
 #### Option B — Classic editor / raw HTML block
 
 Paste the following HTML anywhere in the page content:
 
 ```html
+<!-- Full book (all parts) -->
 <button data-print-book="42">Download Book</button>
+
+<!-- Light version (light.pdf only) -->
+<button data-print-book="42" data-light-book="true">Download Light Version</button>
 ```
 
 #### Option C — Theme template or custom HTML widget
 
 ```html
-<!-- Trigger the deep-link flow for book ID 42 -->
+<!-- Trigger the deep-link flow for book ID 42 (full book) -->
 <button data-print-book="42" class="download-btn">
   Download Book
+</button>
+
+<!-- Light-book variant -->
+<button data-print-book="42" data-light-book="true" class="download-btn">
+  Download Light Version
 </button>
 ```
 

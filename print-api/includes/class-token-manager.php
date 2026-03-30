@@ -61,10 +61,11 @@ class Print_API_Token_Manager {
 	 *
 	 * @param  int      $book_id  The book this token grants access to.
 	 * @param  int|null $part     If set, this is a part token locked to a specific
-	 *                            part number (1–3). Omit for a book-level token.
+	 *                            part number (1–N). Omit for a book-level token.
+	 * @param  bool     $light    If true, the token grants access to light.pdf only.
 	 * @return string             64-character hex token.
 	 */
-	public static function generate( $book_id, $part = null ) {
+	public static function generate( $book_id, $part = null, $light = false ) {
 		// random_bytes() uses the OS CSPRNG (/dev/urandom on Linux).
 		// bin2hex() converts the binary string to readable hex.
 		// Result: 64 hex chars = 256 bits of entropy → infeasible to guess.
@@ -80,6 +81,11 @@ class Print_API_Token_Manager {
 		// exactly which file to stream without any client-supplied parameters.
 		if ( null !== $part ) {
 			$data['part'] = (int) $part;
+		}
+
+		// Light tokens grant access to light.pdf instead of the regular parts.
+		if ( $light ) {
+			$data['light'] = true;
 		}
 
 		// set_transient( key, value, expiration_in_seconds )

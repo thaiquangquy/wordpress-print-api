@@ -99,4 +99,19 @@ class Print_API_PDF_Resolver {
 
 		return file_exists( $path ) ? $path : false;
 	}
+
+	/**
+	 * Return the absolute filesystem path for a book's light.pdf.
+	 *
+	 * @param  int        $book_id
+	 * @return string|false  Absolute path on success, false if the file doesn't exist.
+	 */
+	public static function get_light_path( $book_id ) {
+		$book_id = (int) $book_id;
+		$upload  = wp_upload_dir();
+		$path    = trailingslashit( $upload['basedir'] )
+		           . 'private/books/' . $book_id . '/light.pdf';
+
+		return file_exists( $path ) ? $path : false;
+	}
 }

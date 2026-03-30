@@ -101,15 +101,17 @@ For each part token the app calls `GET /download?token=<part-token>`. The server
 ## Book file layout
 
 ```
-wp-content/uploads/print-api/
-└── book_{id}/
+wp-content/uploads/private/books/
+└── {id}/
     ├── part1.pdf
     ├── part2.pdf
-    └── partN.pdf          ← any number of parts
+    ├── partN.pdf          ← any number of parts
+    └── light.pdf          ← optional; served when light_book=true
 ```
 
-- The directory name must match the numeric book ID used in the download button.
+- The directory name is the numeric book ID.
 - Parts must be named `part1.pdf`, `part2.pdf`, … with no gaps. The plugin counts them by walking the sequence until the first missing number.
+- `light.pdf` is an optional lightweight variant served when the `light_book` flag is set on the token request.
 - The directory is protected by `.htaccess` on activation so direct HTTP access returns 403. Files are only reachable through the streaming endpoint.
 
 ---
@@ -133,6 +135,7 @@ wp-content/uploads/print-api/
 | `PRINT_API_REQUIRE_LOGIN` | `print-api.php` | `true` | When `true`, only logged-in users can call `POST /token` |
 | `TOKEN_TTL` | `class-token-manager.php` | `300` (5 min) | Seconds before any token expires |
 | `DOWNLOAD_FLOW` | `assets/js/frontend.js` | `'deeplink'` | `'deeplink'` fires the `cyberthrone://` URL; `'browser'` downloads directly in the browser |
+| `data-light-book` | HTML button attribute | _(absent)_ | Set to `"true"` on a `data-print-book` button to request `light.pdf` instead of the full parts |
 
 ---
 

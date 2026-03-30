@@ -90,12 +90,18 @@ class Print_API_Rest {
 				// WordPress will automatically reject requests missing required
 				// params or failing the 'validate_callback'.
 				'args'                => array(
-					'book_id' => array(
+					'book_id'   => array(
 						'required'          => true,
 						'type'              => 'integer',
 						'minimum'           => 1,
-						'sanitize_callback' => 'absint',   // absint = absolute integer (always ≥ 0)
+						'sanitize_callback' => 'absint',
 						'description'       => 'The numeric ID of the book to download.',
+					),
+					'light_book' => array(
+						'required'    => false,
+						'type'        => 'boolean',
+						'default'     => false,
+						'description' => 'If true, issue a light-book token (serves light.pdf instead of the full parts).',
 					),
 				),
 			)
@@ -117,12 +123,18 @@ class Print_API_Rest {
 						'description'       => 'The one-time book token issued by the /token endpoint, or the dev master token.',
 					),
 					// book_id is only used when presenting the dev master token.
-					'book_id' => array(
+					'book_id'   => array(
 						'required'          => false,
 						'type'              => 'integer',
 						'minimum'           => 1,
 						'sanitize_callback' => 'absint',
 						'description'       => 'Required when using the dev master token; ignored otherwise.',
+					),
+					'light_book' => array(
+						'required'    => false,
+						'type'        => 'boolean',
+						'default'     => false,
+						'description' => 'Only used with the dev master token to simulate a light-book request.',
 					),
 				),
 			)
@@ -217,7 +229,8 @@ class Print_API_Rest {
 
 		// ── Step 3: Generate book token ───────────────────────────────────────
 		$book_id = $request->get_param( 'book_id' );
-		$token   = Print_API_Token_Manager::generate( $book_id );
+		$light   = (bool) $request->get_param( 'light_book' );
+		$token   = Print_API_Token_Manager::generate( $book_id, null, $light );
 
 		return new WP_REST_Response(
 			array( 'token' => $token ),
@@ -250,10 +263,13 @@ class Print_API_Rest {
 						&& defined( 'WP_DEBUG' ) && WP_DEBUG
 						&& hash_equals( $master_token, $token );
 
+		$is_light = false;
+
 		if ( $is_master ) {
 			// ── Dev master token path ─────────────────────────────────────────
 			// Never consumed — reusable across test runs. Requires book_id param.
-			$book_id = absint( $request->get_param( 'book_id' ) );
+			$book_id  = absint( $request->get_param( 'book_id' ) );
+			$is_light = (bool) $request->get_param( 'light_book' );
 			if ( ! $book_id ) {
 				return new WP_Error(
 					'missing_book_id',
@@ -282,7 +298,28 @@ class Print_API_Rest {
 				);
 			}
 
-			$book_id = (int) $data['book_id'];
+			$book_id  = (int) $data['book_id'];
+			$is_light = ! empty( $data['light'] );
+		}
+
+		// ── Light book: single token for light.pdf ────────────────────────────
+		if ( $is_light ) {
+			if ( false === Print_API_PDF_Resolver::get_light_path( $book_id ) ) {
+				return new WP_Error(
+					'book_not_found',
+					'light.pdf for this book could not be located on the server.',
+					array( 'status' => 404 )
+				);
+			}
+
+			return new WP_REST_Response(
+				array(
+					'parts'      => array( Print_API_Token_Manager::generate( $book_id, 1, true ) ),
+					'part_count' => 1,
+					'book_id'    => $book_id,
+				),
+				200
+			);
 		}
 
 		// ── Count how many parts exist for this book ──────────────────────────
@@ -358,11 +395,16 @@ class Print_API_Rest {
 			);
 		}
 
-		$book_id  = (int) $data['book_id'];
-		$part_num = (int) $data['part'];
+		$book_id   = (int) $data['book_id'];
+		$part_num  = (int) $data['part'];
+		$is_light  = ! empty( $data['light'] );
 
 		// ── Resolve file path ─────────────────────────────────────────────────
-		$path = Print_API_PDF_Resolver::get_part_path( $book_id, $part_num );
+		if ( $is_light ) {
+			$path = Print_API_PDF_Resolver::get_light_path( $book_id );
+		} else {
+			$path = Print_API_PDF_Resolver::get_part_path( $book_id, $part_num );
+		}
 
 		if ( false === $path ) {
 			return new WP_Error(
@@ -375,7 +417,7 @@ class Print_API_Rest {
 		// ── Stream the file ───────────────────────────────────────────────────
 		// We send the bytes directly rather than redirecting to a URL.
 		// This means the real file path never reaches the client.
-		$filename = 'book_' . $book_id . '_part' . $part_num . '.pdf';
+		$filename = $is_light ? 'light.pdf' : 'book_' . $book_id . '_part' . $part_num . '.pdf';
 
 		// Prevent any output buffering from truncating large files.
 		if ( ob_get_level() ) {
