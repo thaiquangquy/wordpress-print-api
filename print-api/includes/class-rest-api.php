@@ -434,7 +434,7 @@ class Print_API_Rest {
 
 		$book_id    = $request->get_param( 'book_id' );
 		$upload     = wp_upload_dir();
-		$dir        = trailingslashit( $upload['basedir'] ) . 'print-api/book_' . $book_id;
+		$dir        = trailingslashit( $upload['basedir'] ) . 'private/books/' . $book_id;
 		$part_count = Print_API_PDF_Resolver::get_part_count( $book_id );
 
 		// Show all found parts plus the first missing one so the admin can see

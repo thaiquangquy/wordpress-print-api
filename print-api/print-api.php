@@ -115,7 +115,7 @@ register_activation_hook( __FILE__, 'print_api_activate' );
  */
 function print_api_activate() {
 	$upload  = wp_upload_dir();
-	$pdf_dir = $upload['basedir'] . '/print-api';
+	$pdf_dir = $upload['basedir'] . '/private/books';
 
 	// wp_mkdir_p() creates the directory recursively, like `mkdir -p`.
 	if ( ! file_exists( $pdf_dir ) ) {
@@ -124,7 +124,7 @@ function print_api_activate() {
 
 	// Drop an .htaccess file so Apache denies direct HTTP access to the PDFs.
 	// Even if someone guesses the URL they cannot download without a valid token.
-	$htaccess = $pdf_dir . '/.htaccess';
+	$htaccess = trailingslashit( $upload['basedir'] ) . 'private/.htaccess';
 	if ( ! file_exists( $htaccess ) ) {
 		// "Deny from all" blocks every direct HTTP request to this directory.
 		file_put_contents( $htaccess, "Options -Indexes\nDeny from all\n" ); // phpcs:ignore

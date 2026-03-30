@@ -8,9 +8,9 @@
  * ────────────────────
  * PDFs live inside the WordPress uploads directory under a sub-folder:
  *
- *   wp-content/uploads/print-api/book_{book_id}/part1.pdf
- *   wp-content/uploads/print-api/book_{book_id}/part2.pdf
- *   wp-content/uploads/print-api/book_{book_id}/partN.pdf
+ *   wp-content/uploads/private/books/{book_id}/part1.pdf
+ *   wp-content/uploads/private/books/{book_id}/part2.pdf
+ *   wp-content/uploads/private/books/{book_id}/partN.pdf
  *
  * Any number of parts is supported. Parts must be named part1.pdf, part2.pdf,
  * … partN.pdf with no gaps. The plugin counts how many exist automatically.
@@ -25,7 +25,7 @@
  *
  * How to add a new book
  * ─────────────────────
- * 1. Create the folder:  wp-content/uploads/print-api/book_42/
+ * 1. Create the folder:  wp-content/uploads/private/books/42/
  * 2. Drop in:            part1.pdf, part2.pdf, … partN.pdf  (any count)
  * That's it. No code change required.
  *
@@ -59,7 +59,7 @@ class Print_API_PDF_Resolver {
 	public static function get_part_count( $book_id ) {
 		$book_id = (int) $book_id;
 		$upload  = wp_upload_dir();
-		$dir     = trailingslashit( $upload['basedir'] ) . 'print-api/book_' . $book_id;
+		$dir     = trailingslashit( $upload['basedir'] ) . 'private/books/' . $book_id;
 
 		if ( ! is_dir( $dir ) ) {
 			return 0;
@@ -94,7 +94,7 @@ class Print_API_PDF_Resolver {
 
 		$upload = wp_upload_dir();
 		$path   = trailingslashit( $upload['basedir'] )
-		          . 'print-api/book_' . $book_id
+		          . 'private/books/' . $book_id
 		          . '/part' . $part_num . '.pdf';
 
 		return file_exists( $path ) ? $path : false;
