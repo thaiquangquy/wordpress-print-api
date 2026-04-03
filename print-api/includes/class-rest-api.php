@@ -227,6 +227,19 @@ class Print_API_Rest {
 			);
 		}
 
+		// ── Step 2b: Rate limit — max 20 token requests per user per minute ──
+		// Prevents a logged-in user from flooding wp_options with transients.
+		$rate_key   = 'print_api_rate_' . get_current_user_id();
+		$rate_count = (int) get_transient( $rate_key );
+		if ( $rate_count >= 20 ) {
+			return new WP_Error(
+				'rate_limited',
+				'Too many token requests. Please wait a moment and try again.',
+				array( 'status' => 429 )
+			);
+		}
+		set_transient( $rate_key, $rate_count + 1, 60 );
+
 		// ── Step 3: Generate book token ───────────────────────────────────────
 		$book_id = $request->get_param( 'book_id' );
 		$light   = (bool) $request->get_param( 'light_book' );

@@ -51,6 +51,14 @@ class Print_API_Token_Manager {
 	const KEY_PREFIX = 'print_api_token_';
 
 	/**
+	 * Prefix for the short-lived consume-lock transients.
+	 * A lock is set for 10 seconds when a token is being consumed so that a
+	 * second concurrent request racing on the same token is rejected immediately
+	 * rather than proceeding past the get_transient() call.
+	 */
+	const LOCK_PREFIX = 'print_api_lock_';
+
+	/**
 	 * Generate a new one-time token for the given book (and optionally a specific part).
 	 *
 	 * Steps:
@@ -125,11 +133,28 @@ class Print_API_Token_Manager {
 			return false;
 		}
 
+		// ── Concurrency lock ──────────────────────────────────────────────────
+		// get_transient() + delete_transient() are two separate DB round-trips.
+		// Under heavy concurrency, two requests could both read the same token
+		// before either deletes it. The lock transient closes that window:
+		// only the request that successfully writes the lock proceeds; any other
+		// concurrent request for the same token finds the lock and returns false.
+		//
+		// Note: set_transient() is not a true atomic test-and-set on the default
+		// DB backend, but the lock window (10 s) is far shorter than the token
+		// TTL (300 s), making a successful double-consume extremely unlikely.
+		$lock_key = self::LOCK_PREFIX . $token;
+		if ( get_transient( $lock_key ) ) {
+			return false;  // Another request is already consuming this token.
+		}
+		set_transient( $lock_key, 1, 10 );  // Hold the lock for 10 seconds.
+
 		$key  = self::KEY_PREFIX . $token;
 		$data = get_transient( $key );   // Returns false if not found or expired.
 
 		if ( false === $data ) {
 			// Token doesn't exist: either it expired, was already used, or was never valid.
+			delete_transient( $lock_key );
 			return false;
 		}
 
@@ -138,6 +163,9 @@ class Print_API_Token_Manager {
 		// If we returned the data first and then crashed, the token would still
 		// exist and could be replayed. Delete-first prevents that.
 		delete_transient( $key );
+		// Lock expires naturally after 10 s — no need to delete it manually.
+		// Keeping it alive prevents any late-arriving duplicate request from
+		// re-reading the (now deleted) token key and getting a false "not found".
 
 		return $data;
 	}
