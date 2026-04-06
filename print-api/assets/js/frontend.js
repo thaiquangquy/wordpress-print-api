@@ -13,15 +13,13 @@
  *
  * So window.printApiConfig is always available here.
  *
- * How this works (3-step protocol)
- * ──────────────────────────────────
+ * How this works
+ * ───────────────
  * 1. User clicks a "Download" button that has data-print-book="123".
- * 2. POST /token  → server returns { token: "<book-token>" }   (one-time)
- * 3. GET  /pdf?token=<book-token>
- *         → server returns { parts: ["<part1-token>", …, "<partN-token>"] }
- *            Each part token is also one-time. No file URLs are ever sent.
- * 4. GET  /download?token=<part-token>  (once per part)
- *         → server streams the PDF bytes directly.
+ * 2. POST /token   body: { book_id }
+ *         → server returns { token: "<book-token>" }   (one-time)
+ * 3. Browser is redirected to cyberthrone://print?token=<book-token>.
+ *    The native app handles the rest of the download flow.
  *
  * Light-book variant
  * ───────────────────
@@ -29,7 +27,7 @@
  * (a single-part download served from books/{id}/light.pdf on the server).
  * The token chain is the same; the server simply serves a different file.
  *
- * Because the server streams bytes through /download, there is no persistent
+ * Because the server streams bytes through the native app, there is no persistent
  * URL for the PDF files — every download requires a fresh one-time token.
  */
 
@@ -82,7 +80,7 @@
   /**
    * Use this when your PDF viewer is a native app that registers the
    * "cyberthrone://" URL scheme.  The app receives the token and must then call
-   * GET /wp-json/print-api/v1/pdf?token=… itself to get the download URLs.
+   * POST /wp-json/print-api/v1/pdf with body { token } to get the part tokens.
    *
    * @param {number}  bookId
    * @param {boolean} [lightBook=false]
@@ -95,47 +93,6 @@
     window.location.href = `cyberthrone://print?token=${token}`;
   }
 
-  // ── Flow B: Full browser download (3-step) ────────────────────────────────
-  /**
-   * Use this for a pure-web flow where the browser itself downloads the PDFs.
-   *
-   * Step 1: Request a book token (with optional light_book flag).
-   * Step 2: Exchange it for per-part tokens (no file URLs are returned).
-   *         For a light-book token the server returns exactly one part token
-   *         that resolves to light.pdf.
-   * Step 3: Navigate to /download?token=<part-token> for each part —
-   *         the server streams the bytes and the browser saves the file.
-   *
-   * @param {number}  bookId
-   * @param {boolean} [lightBook=false]
-   * @returns {Promise<void>}
-   */
-  async function downloadViaBrowser(bookId, lightBook = false) {
-    const bookToken = await requestToken(bookId, lightBook);
-
-    // Exchange book token for per-part tokens.
-    const response = await fetch(
-      printApiConfig.restUrl + '/pdf?token=' + encodeURIComponent(bookToken)
-    );
-
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.message || 'Failed to exchange token for PDF parts.');
-    }
-
-    const data = await response.json();
-    // data.parts = ["<token>"]           for a light book  (1 part → light.pdf)
-    // data.parts = ["<t1>", "<t2>", …]  for a regular book (N parts)
-    data.parts.forEach(function (partToken) {
-      // Opening in a new tab triggers the browser's "save file" prompt because
-      // the server sends Content-Disposition: attachment.
-      window.open(
-        printApiConfig.restUrl + '/download?token=' + encodeURIComponent(partToken),
-        '_blank'
-      );
-    });
-  }
-
   // ── Wire up buttons on the page ────────────────────────────────────────────
   //
   // Standard download button (all parts):
@@ -143,10 +100,6 @@
   //
   // Light-book download button (light.pdf only):
   //   <button data-print-book="123" data-light-book="true">Download Light Version</button>
-  //
-  // Change DOWNLOAD_FLOW below to switch between the two flows.
-
-  const DOWNLOAD_FLOW = 'deeplink';   // 'deeplink' | 'browser'
 
   document.addEventListener('DOMContentLoaded', function () {
     // Find every button/element that has a data-print-book attribute.
@@ -168,11 +121,7 @@
         button.textContent = 'Preparing download…';
 
         try {
-          if (DOWNLOAD_FLOW === 'deeplink') {
-            await downloadViaAppDeepLink(bookId, lightBook);
-          } else {
-            await downloadViaBrowser(bookId, lightBook);
-          }
+          await downloadViaAppDeepLink(bookId, lightBook);
         } catch (error) {
           console.error('Print API error:', error);
           alert('Download failed: ' + error.message);

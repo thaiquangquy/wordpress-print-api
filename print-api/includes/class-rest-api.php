@@ -12,7 +12,8 @@
  *         Headers:     X-WP-Nonce: <nonce>
  *         Response:    { "token": "<64-char-hex>" }   ← book-level token (one-time)
  *
- *   GET   /wp-json/print-api/v1/pdf?token=<book-token>
+ *   POST  /wp-json/print-api/v1/pdf
+ *         Body (JSON): { "token": "<book-token>" }
  *         Consumes the book token.
  *         Response:    { "parts": ["<part1-token>", …, "<partN-token>"], "part_count": N }
  *         One token per part file found on disk (any count, not fixed at 3).
@@ -20,7 +21,8 @@
  *         NOTE: returns tokens, NOT file URLs — the actual PDF paths are
  *               never exposed to the client.
  *
- *   GET   /wp-json/print-api/v1/download?token=<part-token>
+ *   POST  /wp-json/print-api/v1/download
+ *         Body (JSON): { "token": "<part-token>" }
  *         Consumes the part token and streams the PDF bytes directly.
  *         The real file URL/path is kept server-side only.
  *
@@ -112,7 +114,7 @@ class Print_API_Rest {
 			self::NAMESPACE,
 			'/pdf',
 			array(
-				'methods'             => WP_REST_Server::READABLE,   // = 'GET'
+				'methods'             => WP_REST_Server::CREATABLE,   // = 'POST'
 				'callback'            => array( __CLASS__, 'handle_pdf_request' ),
 				'permission_callback' => '__return_true',
 				'args'                => array(
@@ -145,7 +147,7 @@ class Print_API_Rest {
 			self::NAMESPACE,
 			'/download',
 			array(
-				'methods'             => WP_REST_Server::READABLE,   // = 'GET'
+				'methods'             => WP_REST_Server::CREATABLE,   // = 'POST'
 				'callback'            => array( __CLASS__, 'handle_download_request' ),
 				'permission_callback' => '__return_true',
 				'args'                => array(
@@ -241,8 +243,9 @@ class Print_API_Rest {
 		set_transient( $rate_key, $rate_count + 1, 60 );
 
 		// ── Step 3: Generate book token ───────────────────────────────────────
-		$book_id = $request->get_param( 'book_id' );
-		$light   = (bool) $request->get_param( 'light_book' );
+		$json    = $request->get_json_params();
+		$book_id = isset( $json['book_id'] ) ? absint( $json['book_id'] ) : 0;
+		$light   = ! empty( $json['light_book'] );
 		$token   = Print_API_Token_Manager::generate( $book_id, null, $light );
 
 		return new WP_REST_Response(
@@ -270,7 +273,8 @@ class Print_API_Rest {
 	 */
 	public static function handle_pdf_request( WP_REST_Request $request ) {
 
-		$token        = $request->get_param( 'token' );
+		$json         = $request->get_json_params();
+		$token        = isset( $json['token'] ) ? sanitize_text_field( $json['token'] ) : '';
 		$master_token = PRINT_API_DEV_MASTER_TOKEN;
 		$is_master    = $master_token !== ''
 						&& defined( 'WP_DEBUG' ) && WP_DEBUG
@@ -280,13 +284,15 @@ class Print_API_Rest {
 
 		if ( $is_master ) {
 			// ── Dev master token path ─────────────────────────────────────────
-			// Never consumed — reusable across test runs. Requires book_id param.
-			$book_id  = absint( $request->get_param( 'book_id' ) );
-			$is_light = (bool) $request->get_param( 'light_book' );
+			// Never consumed — reusable across test runs.
+			// book_id must be provided in the JSON request body, not as a query param.
+			$json     = $request->get_json_params();
+			$book_id  = isset( $json['book_id'] ) ? absint( $json['book_id'] ) : 0;
+			$is_light = ! empty( $json['light_book'] );
 			if ( ! $book_id ) {
 				return new WP_Error(
 					'missing_book_id',
-					'book_id query parameter is required when using the master token.',
+					'book_id is required in the request body when using the master token.',
 					array( 'status' => 400 )
 				);
 			}
@@ -385,7 +391,8 @@ class Print_API_Rest {
 	 */
 	public static function handle_download_request( WP_REST_Request $request ) {
 
-		$token = $request->get_param( 'token' );
+		$json  = $request->get_json_params();
+		$token = isset( $json['token'] ) ? sanitize_text_field( $json['token'] ) : '';
 
 		// ── Consume the part token ────────────────────────────────────────────
 		$data = Print_API_Token_Manager::consume( $token );

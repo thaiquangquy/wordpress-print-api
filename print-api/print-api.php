@@ -57,40 +57,6 @@ require_once PRINT_API_DIR . 'includes/class-token-manager.php';
 require_once PRINT_API_DIR . 'includes/class-pdf-resolver.php';
 require_once PRINT_API_DIR . 'includes/class-rest-api.php';
 
-// ─── Bypass maintenance / coming-soon mode for our REST namespace ─────────────
-// Elementor Maintenance Mode intercepts ALL requests early and returns 503
-// before WordPress REST API runs. We hook at priority 0 on 'init' — earlier
-// than Elementor — detect our REST prefix, and disable its maintenance filter.
-// The rest_authentication_errors filter covers the WordPress-level restriction.
-add_action( 'init', 'print_api_bypass_maintenance_mode', 0 );
-
-function print_api_bypass_maintenance_mode() {
-	$rest_prefix = rest_get_url_prefix(); // 'wp-json' by default
-	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '';
-
-	// Only act when the request is for our namespace.
-	if ( false === strpos( $request_uri, '/' . $rest_prefix . '/print-api/v1/' ) ) {
-		return;
-	}
-
-	// Elementor Maintenance Mode
-	add_filter( 'elementor/maintenance_mode/is_maintenance_mode', '__return_false' );
-}
-
-// WordPress's own REST authentication layer: return null (= no error) for our routes.
-add_filter( 'rest_authentication_errors', 'print_api_rest_auth_bypass', 99 );
-
-function print_api_rest_auth_bypass( $result ) {
-	$rest_prefix = rest_get_url_prefix();
-	$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? $_SERVER['REQUEST_URI'] : '';
-
-	if ( false !== strpos( $request_uri, '/' . $rest_prefix . '/print-api/v1/' ) ) {
-		return null; // null = no authentication error; let the request proceed
-	}
-
-	return $result;
-}
-
 // ─── Bootstrap REST API ──────────────────────────────────────────────────────
 // 'rest_api_init' fires after WordPress has loaded its REST infrastructure.
 // We register our routes inside this hook so they're available at the right time.

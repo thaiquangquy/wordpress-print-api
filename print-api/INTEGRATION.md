@@ -51,14 +51,16 @@ window.location = cyberthrone://print?token=<book-token>
         └─────────────────────────────────────────────────►  app wakes up
                                                               parses token
                                                                   │
-                                                GET /pdf?token=<book-token>
+                                                POST /pdf
+                                                { "token": "<book-token>" }
                                                                   │──────►
                                                                   │  consumes book token
                                                                   │  returns N part tokens
                                                                   ◄──────
                                                                   │
                                               for each part token:
-                                              GET /download?token=<part-token>
+                                              POST /download
+                                              { "token": "<part-token>" }
                                                                   │──────►
                                                                   │  consumes part token
                                                                   │  streams PDF bytes
@@ -120,15 +122,24 @@ The `light_book` flag is encoded inside the token — the response shape is iden
 
 ---
 
-### `GET /pdf?token=<book-token>`
+### `POST /pdf`
 
 Consumes the book token and returns one one-time download token per PDF part.
 
-**Query parameters**
+**Request body**
 
-| Parameter | Description |
-|-----------|-------------|
-| `token` | The book token returned by `POST /token` |
+```json
+{ "token": "<book-token>" }
+```
+
+**Dev environment only (`WP_DEBUG = true` + master token)**
+
+When sending `PRINT_API_DEV_MASTER_TOKEN` as the token value, the master token is never consumed. `book_id` must be supplied in the JSON body (not as a query parameter); `light_book` is optional.
+
+```json
+{ "token": "<master-token>", "book_id": 42 }
+{ "token": "<master-token>", "book_id": 42, "light_book": true }
+```
 
 **Response `200`**
 
@@ -165,15 +176,17 @@ For a **light-book token** the response is always `part_count: 1` with a single 
 
 ---
 
-### `GET /download?token=<part-token>`
+### `POST /download`
 
 Consumes a part token and streams the PDF bytes directly. No redirect — the response body is the file.
 
-**Query parameters**
+**Request body**
 
-| Parameter | Description |
-|-----------|-------------|
-| `token` | A part token from the `parts` array returned by `GET /pdf` |
+```json
+{ "token": "<part-token>" }
+```
+
+The `token` value is a part token from the `parts` array returned by `POST /pdf`.
 
 **Response `200`**
 
@@ -480,11 +493,9 @@ async function handleDeepLink(rawUrl) {
 
 ### 2.3 Exchange the book token for part tokens
 
-Call `GET /pdf?token=<book-token>`. This consumes the book token and returns an array of one-time part tokens plus the total part count.
+Call `POST /pdf` with the book token in the request body. This consumes the book token and returns an array of one-time part tokens plus the total part count.
 
 ```js
-const https = require('https');   // or use node-fetch / axios
-
 const WP_REST_BASE = 'https://<your-wordpress-site>/wp-json/print-api/v1';
 
 /**
@@ -493,12 +504,15 @@ const WP_REST_BASE = 'https://<your-wordpress-site>/wp-json/print-api/v1';
  * @returns {Promise<{ bookId: number, partCount: number, partTokens: string[] }>}
  */
 async function getPartTokens(bookToken) {
-  const url = `${WP_REST_BASE}/pdf?token=${encodeURIComponent(bookToken)}`;
-  const res = await fetch(url);
+  const res = await fetch(`${WP_REST_BASE}/pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: bookToken }),
+  });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.message || `GET /pdf failed with HTTP ${res.status}`);
+    throw new Error(body.message || `POST /pdf failed with HTTP ${res.status}`);
   }
 
   const data = await res.json();
@@ -511,13 +525,13 @@ async function getPartTokens(bookToken) {
 }
 ```
 
-> **Important:** Call this only once per book token. The book token is consumed on the first call. If the call fails (network error, etc.) the token is gone and the user must click the download button again on the WordPress page.
+> **Important:** Call this only once per book token. The book token is consumed on the first `POST /pdf` call. If the call fails (network error, etc.) the token is gone and the user must click the download button again on the WordPress page.
 
 ---
 
 ### 2.4 Download each part
 
-Call `GET /download?token=<part-token>` for each entry in `partTokens`. The response body is the raw PDF bytes.
+Call `POST /download` with the part token in the request body for each entry in `partTokens`. The response body is the raw PDF bytes.
 
 ```js
 const fs = require('fs');
@@ -526,20 +540,23 @@ const { app } = require('electron');
 
 /**
  * Download a single PDF part to disk.
- * @param {string} partToken  - One-time part token from GET /pdf
+ * @param {string} partToken  - One-time part token from POST /pdf
  * @param {number} bookId
  * @param {number} partNumber - 1-based index
  * @param {string} destDir    - Directory to save the file in
  * @returns {Promise<string>} Absolute path to the saved file
  */
 async function downloadPart(partToken, bookId, partNumber, destDir) {
-  const url = `${WP_REST_BASE}/download?token=${encodeURIComponent(partToken)}`;
-  const res = await fetch(url);
+  const res = await fetch(`${WP_REST_BASE}/download`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: partToken }),
+  });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(
-      body.message || `GET /download failed with HTTP ${res.status} for part ${partNumber}`
+      body.message || `POST /download failed with HTTP ${res.status} for part ${partNumber}`
     );
   }
 
@@ -554,7 +571,7 @@ async function downloadPart(partToken, bookId, partNumber, destDir) {
 }
 ```
 
-> **Important:** Each part token is also one-time. Do not retry a failed `GET /download` with the same token — it will return `401`. If a part download fails, the user must restart the flow from the WordPress download button.
+> **Important:** Each part token is also one-time. Do not retry a failed `POST /download` with the same token — it will return `401`. If a part download fails, the user must restart the flow from the WordPress download button.
 
 ---
 
@@ -607,22 +624,28 @@ async function downloadBook(bookToken) {
 // ── Helpers (same as sections 2.3 and 2.4 above) ────────────────────────────
 
 async function getPartTokens(bookToken) {
-  const url = `${WP_REST_BASE}/pdf?token=${encodeURIComponent(bookToken)}`;
-  const res = await fetch(url);
+  const res = await fetch(`${WP_REST_BASE}/pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: bookToken }),
+  });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.message || `GET /pdf failed: HTTP ${res.status}`);
+    throw new Error(body.message || `POST /pdf failed: HTTP ${res.status}`);
   }
   const data = await res.json();
   return { bookId: data.book_id, partCount: data.part_count, partTokens: data.parts };
 }
 
 async function downloadPart(partToken, bookId, partNumber, destDir) {
-  const url = `${WP_REST_BASE}/download?token=${encodeURIComponent(partToken)}`;
-  const res = await fetch(url);
+  const res = await fetch(`${WP_REST_BASE}/download`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: partToken }),
+  });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.message || `GET /download failed: HTTP ${res.status} (part ${partNumber})`);
+    throw new Error(body.message || `POST /download failed: HTTP ${res.status} (part ${partNumber})`);
   }
   const filename = `book_${bookId}_part${partNumber}.pdf`;
   const filePath = path.join(destDir, filename);
@@ -668,10 +691,10 @@ ipcRenderer.on('download-progress', (_event, { bookId, part, total, filePath }) 
 
 | Token type | Issued by | Consumed by | TTL | One-time? |
 |------------|-----------|-------------|-----|-----------|
-| Book token | `POST /token` | `GET /pdf` | 5 min | Yes |
-| Part token | `GET /pdf` | `GET /download` | 5 min | Yes |
+| Book token | `POST /token` | `POST /pdf` | 5 min | Yes |
+| Part token | `POST /pdf` | `POST /download` | 5 min | Yes |
 
-**TTL is shared, not sequential.** All part tokens are minted at the same moment `GET /pdf` is called. If the Electron app takes longer than 5 minutes to download all parts (e.g. large files on a slow connection), later part tokens will be expired. For books with many large parts, increase `TOKEN_TTL` in `class-token-manager.php`:
+**TTL is shared, not sequential.** All part tokens are minted at the same moment `POST /pdf` is called. If the Electron app takes longer than 5 minutes to download all parts (e.g. large files on a slow connection), later part tokens will be expired. For books with many large parts, increase `TOKEN_TTL` in `class-token-manager.php`:
 
 ```php
 const TOKEN_TTL = 900;  // 15 minutes
@@ -695,6 +718,6 @@ All error responses follow the WordPress REST API format:
 |------|------|---------------------|---------|
 | `invalid_nonce` | 403 | `POST /token` | `X-WP-Nonce` header is missing or invalid. Reload the WordPress page to get a fresh nonce. |
 | `login_required` | 401 | `POST /token` | User is not logged in and `PRINT_API_REQUIRE_LOGIN` is `true`. |
-| `invalid_token` | 401 | `GET /pdf`, `GET /download` | Token is wrong, expired, already used, or is the wrong type (book vs part). |
-| `book_not_found` | 404 | `GET /pdf`, `GET /download` | No PDF files found on disk. Check the uploads directory structure. |
+| `invalid_token` | 401 | `POST /pdf`, `POST /download` | Token is wrong, expired, already used, or is the wrong type (book vs part). |
+| `book_not_found` | 404 | `POST /pdf`, `POST /download` | No PDF files found on disk. Check the uploads directory structure. |
 | `debug_disabled` | 403 | `GET /debug/book/{id}` | Debug endpoint requires `WP_DEBUG = true` in `wp-config.php`. |
