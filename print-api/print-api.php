@@ -5,10 +5,10 @@
  * Description:  Secure PDF download via short-lived single-use tokens.
  *               Exposes three REST endpoints:
  *                 POST /wp-json/print-api/v1/token    – issue a book token
- *                 GET  /wp-json/print-api/v1/pdf      – exchange book token for per-part tokens
- *                 GET  /wp-json/print-api/v1/download – consume part token, stream PDF bytes
- * Version:      1.0.1
- * Author:       Your Name
+ *                 POST /wp-json/print-api/v1/pdf      – exchange book token for per-part tokens
+ *                 POST /wp-json/print-api/v1/download – consume part token, stream PDF bytes
+ * Version:      1.0.2
+ * Author:       Bigcool
  * License:      GPL-2.0-or-later
  * Text Domain:  print-api
  *
@@ -28,7 +28,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // PRINT_API_URL      – public URL to this plugin's folder (with trailing slash)
 // PRINT_API_REQUIRE_LOGIN – set to true to require the user to be logged in
 //                           before they can request a token
-define( 'PRINT_API_VERSION',       '1.0.1' );
+define( 'PRINT_API_VERSION',       '1.0.2' );
 define( 'PRINT_API_DIR',           plugin_dir_path( __FILE__ ) );
 define( 'PRINT_API_URL',           plugin_dir_url( __FILE__ ) );
 define( 'PRINT_API_REQUIRE_LOGIN', true );    // ← only logged-in users can request a token
@@ -42,7 +42,8 @@ define( 'PRINT_API_REQUIRE_LOGIN', true );    // ← only logged-in users can re
 //   define( 'PRINT_API_DEV_MASTER_TOKEN', 'your-secret-dev-token' );
 //
 // Then call the /pdf endpoint with:
-//   GET /wp-json/print-api/v1/pdf?token=your-secret-dev-token&book_id=42
+//   POST /wp-json/print-api/v1/pdf
+//   Body (JSON): { "token": "your-secret-dev-token", "book_id": 42 }
 //
 // The master token is NEVER consumed, so you can reuse it across test runs.
 // Leave undefined (or define as empty string) to keep this feature disabled.
