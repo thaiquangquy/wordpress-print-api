@@ -58,7 +58,7 @@ Use this if SSH/rsync is unavailable.
 ```sh
 cd /home/quy/workspace/upwork/wordpress-plugin
 zip -r print-api.zip print-api/ \
-  --exclude "*.git*" --exclude "*.md" --exclude "deploy-*.sh"
+  --exclude "*.git*" --exclude "*.md" --exclude "*.sh"
 ```
 
 ### 2. Upload
