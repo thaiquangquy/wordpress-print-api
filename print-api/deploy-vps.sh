@@ -36,7 +36,7 @@ echo "────────────────────────�
 rsync -avz --delete \
   -e "ssh -p ${VPS_PORT}" \
   --exclude='.git' \
-  --exclude='deploy-*.sh' \
+  --exclude='*.sh' \
   --exclude='*.md' \
   "$SRC" \
   "${VPS_USER}@${VPS_HOST}:${REMOTE_PLUGIN_DIR}"
