@@ -8,12 +8,15 @@
  * ────────────────────
  * PDFs live inside the WordPress uploads directory under a sub-folder:
  *
- *   wp-content/uploads/private/books/{book_id}/part1.pdf
- *   wp-content/uploads/private/books/{book_id}/part2.pdf
- *   wp-content/uploads/private/books/{book_id}/partN.pdf
+ *   wp-content/uploads/private/books/{book_id}/{slug}-part1.pdf
+ *   wp-content/uploads/private/books/{book_id}/{slug}-part2.pdf
+ *   wp-content/uploads/private/books/{book_id}/{slug}-partN.pdf
  *
- * Any number of parts is supported. Parts must be named part1.pdf, part2.pdf,
- * … partN.pdf with no gaps. The plugin counts how many exist automatically.
+ * Example: cyberthrone-coloring-book-for-kids-part1.pdf
+ *
+ * Any number of parts is supported. Parts must follow the {slug}-partN.pdf
+ * pattern with no gaps. The slug is auto-discovered from the filesystem —
+ * no config required. The plugin counts how many exist automatically.
  *
  * This folder is created on plugin activation and protected by .htaccess so
  * that direct HTTP downloads are blocked — files can only be accessed via the
@@ -26,7 +29,8 @@
  * How to add a new book
  * ─────────────────────
  * 1. Create the folder:  wp-content/uploads/private/books/42/
- * 2. Drop in:            part1.pdf, part2.pdf, … partN.pdf  (any count)
+ * 2. Drop in:            {slug}-part1.pdf, {slug}-part2.pdf, … (any count)
+ *    and optionally:     {slug}-light.pdf
  * That's it. No code change required.
  *
  * Extending this class
@@ -43,6 +47,25 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class Print_API_PDF_Resolver {
+
+	/**
+	 * Discover the slug prefix used by a book's PDF files.
+	 *
+	 * Globs for the first `*-part1.pdf` in the book directory and extracts
+	 * the prefix (everything before "part1.pdf").  Returns an empty string
+	 * when no prefixed file is found so callers degrade gracefully.
+	 *
+	 * @param  string $dir  Absolute path to the book's directory.
+	 * @return string       Prefix including trailing dash, e.g. "cyberthrone-coloring-book-for-kids-".
+	 */
+	private static function get_slug_prefix( $dir ) {
+		$matches = glob( trailingslashit( $dir ) . '*-part1.pdf' );
+		if ( empty( $matches ) ) {
+			return '';
+		}
+		$filename = basename( $matches[0] );
+		return substr( $filename, 0, -strlen( 'part1.pdf' ) );
+	}
 
 	/**
 	 * Count how many consecutive part files exist for the given book.
@@ -65,8 +88,9 @@ class Print_API_PDF_Resolver {
 			return 0;
 		}
 
-		$count = 0;
-		while ( file_exists( $dir . '/part' . ( $count + 1 ) . '.pdf' ) ) {
+		$prefix = self::get_slug_prefix( $dir );
+		$count  = 0;
+		while ( file_exists( $dir . '/' . $prefix . 'part' . ( $count + 1 ) . '.pdf' ) ) {
 			$count++;
 		}
 
@@ -93,9 +117,9 @@ class Print_API_PDF_Resolver {
 		}
 
 		$upload = wp_upload_dir();
-		$path   = trailingslashit( $upload['basedir'] )
-		          . 'private/books/' . $book_id
-		          . '/part' . $part_num . '.pdf';
+		$dir    = trailingslashit( $upload['basedir'] ) . 'private/books/' . $book_id;
+		$prefix = self::get_slug_prefix( $dir );
+		$path   = $dir . '/' . $prefix . 'part' . $part_num . '.pdf';
 
 		return file_exists( $path ) ? $path : false;
 	}
@@ -109,9 +133,16 @@ class Print_API_PDF_Resolver {
 	public static function get_light_path( $book_id ) {
 		$book_id = (int) $book_id;
 		$upload  = wp_upload_dir();
-		$path    = trailingslashit( $upload['basedir'] )
-		           . 'private/books/' . $book_id . '/light.pdf';
+		$dir     = trailingslashit( $upload['basedir'] ) . 'private/books/' . $book_id;
 
+		// Try slug-prefixed light file first: {slug}-light.pdf
+		$matches = glob( trailingslashit( $dir ) . '*-light.pdf' );
+		if ( ! empty( $matches ) ) {
+			return $matches[0];
+		}
+
+		// Fallback to bare light.pdf for backwards compatibility during transition.
+		$path = $dir . '/light.pdf';
 		return file_exists( $path ) ? $path : false;
 	}
 }
