@@ -107,7 +107,7 @@
 
     buttons.forEach(function (button) {
       button.addEventListener('click', async function () {
-        const bookId    = parseInt(button.dataset.printBook, 10);
+        const bookId = parseInt(button.dataset.printBook, 10);
         const lightBook = button.dataset.lightBook === 'true';
 
         if (!bookId || bookId < 1) {
@@ -133,5 +133,7 @@
       });
     });
   });
+
+  window.printApi = { downloadViaAppDeepLink };
 
 })();
