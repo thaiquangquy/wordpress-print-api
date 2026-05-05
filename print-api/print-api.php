@@ -7,7 +7,7 @@
  *                 POST /wp-json/print-api/v1/token    – issue a book token
  *                 POST /wp-json/print-api/v1/pdf      – exchange book token for per-part tokens
  *                 POST /wp-json/print-api/v1/download – consume part token, stream PDF bytes
- * Version:      1.0.4
+ * Version:      1.0.5
  * Author:       Bigcool
  * License:      GPL-2.0-or-later
  * Text Domain:  print-api
@@ -28,7 +28,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // PRINT_API_URL      – public URL to this plugin's folder (with trailing slash)
 // PRINT_API_REQUIRE_LOGIN – set to true to require the user to be logged in
 //                           before they can request a token
-define( 'PRINT_API_VERSION',       '1.0.4' );
+define( 'PRINT_API_VERSION',       '1.0.5' );
 define( 'PRINT_API_DIR',           plugin_dir_path( __FILE__ ) );
 define( 'PRINT_API_URL',           plugin_dir_url( __FILE__ ) );
 define( 'PRINT_API_REQUIRE_LOGIN', true );    // ← only logged-in users can request a token
