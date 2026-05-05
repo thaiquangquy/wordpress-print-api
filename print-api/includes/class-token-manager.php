@@ -73,7 +73,7 @@ class Print_API_Token_Manager {
 	 * @param  bool     $light    If true, the token grants access to light.pdf only.
 	 * @return string             64-character hex token.
 	 */
-	public static function generate( $book_id, $part = null, $light = false ) {
+	public static function generate( $book_id, $part = null, $light = false, $user_id = 0 ) {
 		// random_bytes() uses the OS CSPRNG (/dev/urandom on Linux).
 		// bin2hex() converts the binary string to readable hex.
 		// Result: 64 hex chars = 256 bits of entropy → infeasible to guess.
@@ -84,6 +84,12 @@ class Print_API_Token_Manager {
 			'book_id'    => (int) $book_id,
 			'created_at' => time(),   // Unix timestamp — useful for audit logs
 		);
+
+		// Book tokens carry the user_id so /mark-installed can update user meta
+		// without needing a WordPress session from the Electron app.
+		if ( $user_id ) {
+			$data['user_id'] = (int) $user_id;
+		}
 
 		// Part tokens carry the part number so the download endpoint knows
 		// exactly which file to stream without any client-supplied parameters.
@@ -168,5 +174,27 @@ class Print_API_Token_Manager {
 		// re-reading the (now deleted) token key and getting a false "not found".
 
 		return $data;
+	}
+
+	/**
+	 * Peek at a token's data without consuming it.
+	 *
+	 * Used by /mark-installed so the Electron app can identify the WordPress
+	 * user without holding a session cookie. The token is left intact so the
+	 * subsequent /pdf call can still consume it normally.
+	 *
+	 * @param  string      $token  The raw token string from the client.
+	 * @return array|false         Data array on success, false if invalid/expired.
+	 */
+	public static function peek( $token ) {
+		$token = preg_replace( '/[^a-f0-9]/', '', strtolower( $token ) );
+
+		if ( strlen( $token ) !== 64 ) {
+			return false;
+		}
+
+		$data = get_transient( self::KEY_PREFIX . $token );
+
+		return false !== $data ? $data : false;
 	}
 }

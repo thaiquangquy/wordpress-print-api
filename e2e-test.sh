@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # e2e-test.sh
-# End-to-end test for the print-api plugin using the dev master token.
+# End-to-end test for the print-api plugin.
 #
-# Flow:
+# Flow (master-token path — always runs):
 #   1. POST /pdf       with dev master token + book_id → get per-part tokens
 #   2. POST /download  for each part token             → download + verify PDF
 #   3. Verify each part token is one-time (replay returns 401)
+#
+# Flow (authenticated path — runs when WP_USER + WP_PASS are set):
+#   4. POST /mark-installed  negative case: invalid token → 401
+#   5. WordPress login → GET /nonce → POST /token → book token
+#   6. POST /mark-installed  with book token → 200, meta set to yes
+#   7. POST /mark-installed  replay (peek is non-destructive) → still 200
+#   8. POST /pdf  with same book token → 200 (token not consumed by mark-installed)
+#   9. POST /mark-installed  after /pdf consumed the token → 401
 #
 # Usage:
 #   bash e2e-test.sh [BASE_URL] [BOOK_ID] [MASTER_TOKEN]
@@ -13,6 +21,7 @@
 # Examples:
 #   bash e2e-test.sh http://mysite.local 456 my-dev-token
 #   BASE_URL=http://mysite.local BOOK_ID=456 MASTER_TOKEN=my-dev-token bash e2e-test.sh
+#   WP_USER=admin WP_PASS=admin bash e2e-test.sh http://mysite.local 456 my-dev-token
 #
 # Requirements: curl, jq
 # Note: WP_DEBUG must be true and PRINT_API_DEV_MASTER_TOKEN must be set in wp-config.php
@@ -31,6 +40,8 @@ done
 BASE_URL="${1:-${BASE_URL:-http://mysite.local}}"
 BOOK_ID="${2:-${BOOK_ID:-456}}"
 MASTER_TOKEN="${3:-${MASTER_TOKEN:-my-dev-token}}"
+WP_USER="${WP_USER:-}"
+WP_PASS="${WP_PASS:-}"
 API="${BASE_URL}/wp-json/print-api/v1"
 OUT_DIR="$(mktemp -d)"
 PASS=0
@@ -75,6 +86,7 @@ echo "========================================"
 echo "  Base URL     : $BASE_URL"
 echo "  Book ID      : $BOOK_ID"
 echo "  Master token : ${MASTER_TOKEN:0:6}…"
+echo "  WP user      : ${WP_USER:-<not set — skipping auth flow>}"
 echo "  Output dir   : $OUT_DIR"
 echo "========================================"
 echo ""
@@ -179,6 +191,172 @@ for i in $(seq 0 $(( PART_COUNT - 1 ))); do
 
     echo ""
 done
+
+# ── Step 3: /mark-installed — invalid token (no auth needed) ─────────────────
+info "Step 3 — POST /mark-installed  (invalid token → 401)"
+
+MI_INVALID=$(curl $CURL_OPTS -o /dev/null -w "%{http_code}" \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"token":"0000000000000000000000000000000000000000000000000000000000000000"}' \
+    "${API}/mark-installed")
+
+if [[ "$MI_INVALID" == "401" ]]; then
+    ok "/mark-installed: garbage token rejected (401)"
+else
+    fail "/mark-installed: expected 401 for garbage token, got $MI_INVALID"
+fi
+
+echo ""
+
+# ── Step 4: /mark-installed — full authenticated flow ─────────────────────────
+if [[ -z "$WP_USER" || -z "$WP_PASS" ]]; then
+    info "Step 4 — Skipping authenticated /token → /mark-installed flow"
+    info "  To run: WP_USER=admin WP_PASS=admin bash e2e-test.sh ..."
+    echo ""
+else
+    info "Step 4 — Authenticated flow  (WP_USER=$WP_USER)"
+    echo ""
+
+    COOKIE_JAR=$(mktemp)
+
+    # 4a: Login to WordPress to get a session cookie
+    info "  4a — WordPress login"
+    curl $CURL_OPTS \
+        -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+        -o /dev/null \
+        -X POST "${BASE_URL}/wp-login.php" \
+        --data-urlencode "log=${WP_USER}" \
+        --data-urlencode "pwd=${WP_PASS}" \
+        -d "wp-submit=Log+In&redirect_to=%2Fwp-admin%2F&testcookie=1" \
+        -H "Cookie: wordpress_test_cookie=WP+Cookie+check"
+
+    if grep -q "wordpress_logged_in" "$COOKIE_JAR" 2>/dev/null; then
+        ok "  WordPress login succeeded"
+    else
+        fail "  WordPress login failed — check WP_USER and WP_PASS"
+        rm -f "$COOKIE_JAR"
+        info "  Skipping remaining authenticated tests"
+        echo ""
+        # Jump to summary by setting a flag
+        SKIP_AUTH=1
+    fi
+
+    if [[ "${SKIP_AUTH:-0}" == "0" ]]; then
+
+        # 4b: Fetch a fresh nonce
+        info "  4b — GET /nonce"
+        NONCE_RESP=$(curl $CURL_OPTS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+            "${API}/nonce")
+        NONCE=$(printf '%s' "$NONCE_RESP" | jq -r '.nonce // empty')
+
+        if [[ -n "$NONCE" ]]; then
+            ok "  Got nonce: ${NONCE:0:12}…"
+        else
+            fail "  Failed to get nonce — response: $NONCE_RESP"
+        fi
+
+        # 4c: POST /token — issues book token and resets user meta to 'no'
+        info "  4c — POST /token  (book_id=$BOOK_ID)"
+        TOKEN_RESP=$(curl $CURL_OPTS -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+            -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-WP-Nonce: ${NONCE}" \
+            -d "{\"book_id\": ${BOOK_ID}}" \
+            "${API}/token")
+
+        TOKEN_STATUS=$(echo "$TOKEN_RESP" | tail -1)
+        TOKEN_BODY=$(echo "$TOKEN_RESP"   | head -1)
+
+        assert_http "  /token" 200 "$TOKEN_STATUS"
+
+        BOOK_TOKEN=$(printf '%s' "$TOKEN_BODY" | jq -r '.token // empty')
+
+        if [[ ${#BOOK_TOKEN} -eq 64 ]]; then
+            ok "  Book token issued: ${BOOK_TOKEN:0:12}…"
+        else
+            fail "  Book token missing or wrong length — response: $TOKEN_BODY"
+            rm -f "$COOKIE_JAR"
+            SKIP_AUTH=1
+        fi
+    fi
+
+    if [[ "${SKIP_AUTH:-0}" == "0" ]]; then
+
+        # 4d: POST /mark-installed with the valid book token
+        info "  4d — POST /mark-installed  (valid book token)"
+        MI_RESP=$(curl $CURL_OPTS -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"token\": \"${BOOK_TOKEN}\"}" \
+            "${API}/mark-installed")
+
+        MI_STATUS=$(echo "$MI_RESP" | tail -1)
+        MI_BODY=$(echo "$MI_RESP"   | head -1)
+
+        assert_http "  /mark-installed" 200 "$MI_STATUS"
+
+        MI_SUCCESS=$(printf '%s' "$MI_BODY" | jq -r '.success // empty')
+        if [[ "$MI_SUCCESS" == "true" ]]; then
+            ok "  Response contains { success: true }"
+        else
+            fail "  Response missing success field — body: $MI_BODY"
+        fi
+
+        # 4e: Replay /mark-installed — peek is non-destructive, should still succeed
+        info "  4e — POST /mark-installed replay (peek must not consume token)"
+        MI_REPLAY=$(curl $CURL_OPTS -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"token\": \"${BOOK_TOKEN}\"}" \
+            "${API}/mark-installed")
+
+        if [[ "$MI_REPLAY" == "200" ]]; then
+            ok "  /mark-installed replay accepted (200) — token still intact"
+        else
+            fail "  /mark-installed replay returned $MI_REPLAY — expected 200 (peek should not consume)"
+        fi
+
+        # 4f: POST /pdf with the same book token — must succeed (not consumed by mark-installed)
+        info "  4f — POST /pdf  (same book token — must not be consumed yet)"
+        PDF2_RESP=$(curl $CURL_OPTS -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"token\": \"${BOOK_TOKEN}\"}" \
+            "${API}/pdf")
+
+        PDF2_STATUS=$(echo "$PDF2_RESP" | tail -1)
+        PDF2_BODY=$(echo "$PDF2_RESP"   | head -1)
+
+        assert_http "  /pdf (after mark-installed)" 200 "$PDF2_STATUS"
+
+        PDF2_PARTS=$(printf '%s' "$PDF2_BODY" | jq -r '.part_count // empty')
+        if [[ -n "$PDF2_PARTS" && "$PDF2_PARTS" -gt 0 ]]; then
+            ok "  /pdf returned $PDF2_PARTS part token(s) — book token was not consumed by mark-installed"
+        else
+            fail "  /pdf returned unexpected body: $PDF2_BODY"
+        fi
+
+        # 4g: /mark-installed after /pdf consumed the token — must return 401
+        info "  4g — POST /mark-installed after /pdf consumed token (must be 401)"
+        MI_LATE=$(curl $CURL_OPTS -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"token\": \"${BOOK_TOKEN}\"}" \
+            "${API}/mark-installed")
+
+        if [[ "$MI_LATE" == "401" ]]; then
+            ok "  /mark-installed after /pdf correctly rejected (401)"
+        else
+            fail "  /mark-installed after /pdf returned $MI_LATE — expected 401"
+        fi
+
+    fi
+
+    rm -f "$COOKIE_JAR"
+    echo ""
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 TOTAL=$(( PASS + FAIL ))

@@ -161,7 +161,26 @@ class Print_API_Rest {
 			)
 		);
 
-		// ── Route 4: Helper — return a fresh nonce for browser clients ────────
+		// ── Route 4: Mark Electron app as installed for the requesting user ─────
+		register_rest_route(
+			self::NAMESPACE,
+			'/mark-installed',
+			array(
+				'methods'             => WP_REST_Server::CREATABLE,
+				'callback'            => array( __CLASS__, 'handle_mark_installed_request' ),
+				'permission_callback' => '__return_true',
+				'args'                => array(
+					'token' => array(
+						'required'          => true,
+						'type'              => 'string',
+						'sanitize_callback' => 'sanitize_text_field',
+						'description'       => 'The book token issued by the /token endpoint.',
+					),
+				),
+			)
+		);
+
+		// ── Route 5: Helper — return a fresh nonce for browser clients ──────────
 		register_rest_route(
 			self::NAMESPACE,
 			'/nonce',
@@ -173,7 +192,7 @@ class Print_API_Rest {
 			)
 		);
 
-		// ── Route 5: Debug — show resolved PDF paths (only when WP_DEBUG=true) ─
+		// ── Route 6: Debug — show resolved PDF paths (only when WP_DEBUG=true) ──
 		register_rest_route(
 			self::NAMESPACE,
 			'/debug/book/(?P<book_id>\d+)',
@@ -246,12 +265,63 @@ class Print_API_Rest {
 		$json    = $request->get_json_params();
 		$book_id = isset( $json['book_id'] ) ? absint( $json['book_id'] ) : 0;
 		$light   = ! empty( $json['light_book'] );
-		$token   = Print_API_Token_Manager::generate( $book_id, null, $light );
+		$user_id = get_current_user_id();
+
+		// Reset the flag before each attempt so /mark-installed must be called
+		// fresh — stays 'no' if the Electron app never opens.
+		update_user_meta( $user_id, 'installed_cyberthrone_software', 'no' );
+
+		$token = Print_API_Token_Manager::generate( $book_id, null, $light, $user_id );
 
 		return new WP_REST_Response(
 			array( 'token' => $token ),
 			200
 		);
+	}
+
+	// ════════════════════════════════════════════════════════════════════════
+	// Handler: POST /wp-json/print-api/v1/mark-installed
+	// ════════════════════════════════════════════════════════════════════════
+
+	/**
+	 * Called by the Electron app immediately after opening via deep link.
+	 *
+	 * Peeks at the book token (does NOT consume it) to retrieve the WordPress
+	 * user_id that was embedded when the token was issued, then flips
+	 * installed_cyberthrone_software to 'yes'.
+	 *
+	 * If this endpoint is never reached (app not installed, or user denied the
+	 * OS prompt), the meta remains 'no' — set in handle_token_request() — and
+	 * the browser can display an appropriate error.
+	 *
+	 * @param  WP_REST_Request $request
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public static function handle_mark_installed_request( WP_REST_Request $request ) {
+		$json         = $request->get_json_params();
+		$token        = isset( $json['token'] ) ? sanitize_text_field( $json['token'] ) : '';
+		$master_token = PRINT_API_DEV_MASTER_TOKEN;
+		$is_master    = $master_token !== ''
+						&& defined( 'WP_DEBUG' ) && WP_DEBUG
+						&& hash_equals( $master_token, $token );
+
+		if ( $is_master ) {
+			return new WP_REST_Response( array( 'success' => true ), 200 );
+		}
+
+		$data = Print_API_Token_Manager::peek( $token );
+
+		if ( false === $data || empty( $data['user_id'] ) ) {
+			return new WP_Error(
+				'invalid_token',
+				'Token is invalid or expired.',
+				array( 'status' => 401 )
+			);
+		}
+
+		update_user_meta( (int) $data['user_id'], 'installed_cyberthrone_software', 'yes' );
+
+		return new WP_REST_Response( array( 'success' => true ), 200 );
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
